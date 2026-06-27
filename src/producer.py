@@ -1,55 +1,80 @@
 """
-Day 3: GitHub Events API Producer → Kafka
+GitHub Events API Producer → Kafka
 
-Goal: Poll the GitHub Events API every 5 seconds and publish each event
-      to a Kafka topic called "github-events".
+Polls the GitHub Events API every POLL_INTERVAL seconds and publishes
+each event to a Kafka topic as a separate message.
 
-New concepts vs Day 2:
-- KafkaProducer: A client that connects to Kafka and sends messages
-- Topic: A named channel in Kafka. Think of it like a named queue.
-  Producers write to topics; consumers read from topics.
-- Message key: Optional identifier for a message. We use event["id"] as
-  the key so Kafka can route related events to the same partition.
-- Serialization: Kafka only stores bytes. We convert our Python dicts
-  to JSON strings, then encode to bytes before sending.
+Configuration (via .env or environment variables):
+    KAFKA_BROKER       Kafka bootstrap server  (default: localhost:9092)
+    KAFKA_TOPIC        Topic to publish to     (default: github-events)
+    POLL_INTERVAL      Seconds between polls   (default: 5)
+    GITHUB_TOKEN       Optional personal access token — raises rate limit
+                       from 60 req/hr (unauthenticated) to 5000 req/hr
 """
 
-import requests
+import os
 import json
 import time
+
+import requests
+import structlog
+from dotenv import load_dotenv
 from kafka import KafkaProducer
 from kafka.errors import NoBrokersAvailable
 
+load_dotenv()
 
-GITHUB_EVENTS_URL = "https://api.github.com/events"
-POLL_INTERVAL = 5
-KAFKA_BROKER = "localhost:9092"
-KAFKA_TOPIC = "github-events"
+log = structlog.get_logger(__name__)
 
+# ── Configuration ─────────────────────────────────────────────────────────────
+
+GITHUB_EVENTS_URL: str = "https://api.github.com/events"
+KAFKA_BROKER:      str = os.getenv("KAFKA_BROKER", "localhost:9092")
+KAFKA_TOPIC:       str = os.getenv("KAFKA_TOPIC", "github-events")
+POLL_INTERVAL:     int = int(os.getenv("POLL_INTERVAL", "5"))
+GITHUB_TOKEN:      str | None = os.getenv("GITHUB_TOKEN")
+
+
+# ── Kafka setup ───────────────────────────────────────────────────────────────
 
 def create_producer() -> KafkaProducer:
     """
     Connect to Kafka and return a producer.
 
-    value_serializer: Automatically converts each message (a Python dict)
-    to JSON bytes before sending. We don't have to call json.dumps() manually.
+    value_serializer: automatically converts each Python dict to JSON bytes.
+    key_serializer:   encodes the event ID string to bytes for use as a key.
+
+    Using event ID as the message key means Kafka routes all events with the
+    same ID to the same partition — useful if you ever need ordered processing
+    per event.
     """
     return KafkaProducer(
         bootstrap_servers=KAFKA_BROKER,
         value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-        # Also serialize the key (event ID) to bytes
         key_serializer=lambda k: k.encode("utf-8") if k else None,
     )
 
 
+# ── GitHub API ────────────────────────────────────────────────────────────────
+
 def fetch_events(etag: str | None) -> tuple[list[dict], str | None]:
     """
-    Fetch the latest events from GitHub Events API.
-    Same as Day 2 — returns (events, new_etag).
+    Fetch the latest public events from the GitHub Events API.
+
+    Uses ETags for conditional requests: if the data hasn't changed since
+    our last poll, GitHub returns 304 Not Modified with an empty body.
+    This avoids wasting our rate-limit quota on unchanged data.
+
+    Args:
+        etag: The ETag value from the previous response, or None on first call.
+
+    Returns:
+        (events, new_etag): Empty list if nothing changed (304).
     """
-    headers = {
+    headers: dict[str, str] = {
         "Accept": "application/vnd.github.v3+json",
         **({"If-None-Match": etag} if etag else {}),
+        **({"Authorization": f"Bearer {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}),
     }
 
     response = requests.get(GITHUB_EVENTS_URL, headers=headers, timeout=10)
@@ -61,55 +86,48 @@ def fetch_events(etag: str | None) -> tuple[list[dict], str | None]:
     return response.json(), response.headers.get("ETag")
 
 
-def main():
-    print("=== StreamLens GitHub Producer (Day 3) ===")
-    print(f"Connecting to Kafka at {KAFKA_BROKER}...")
+# ── Main loop ─────────────────────────────────────────────────────────────────
 
-    # Connect to Kafka — fail loudly if broker is not running
+def main() -> None:
+    log.info("producer_starting", broker=KAFKA_BROKER, topic=KAFKA_TOPIC, poll_interval=POLL_INTERVAL)
+
     try:
         producer = create_producer()
-        print(f"Connected! Publishing to topic: {KAFKA_TOPIC}\n")
+        log.info("producer_connected", broker=KAFKA_BROKER)
     except NoBrokersAvailable:
-        print("[error] Cannot connect to Kafka. Is docker-compose up?")
+        log.error("no_brokers", broker=KAFKA_BROKER, hint="Is docker-compose up?")
         return
 
-    etag = None
-    poll_count = 0
+    etag: str | None = None
+    poll_count: int = 0
 
     while True:
         poll_count += 1
-        print(f"--- Poll #{poll_count} ---")
+        log.debug("polling", poll=poll_count)
 
         try:
             events, etag = fetch_events(etag)
 
             if events:
-                print(f"[poll] Received {len(events)} events → sending to Kafka")
                 for event in events:
-                    # Send each event as a separate Kafka message
-                    # key=event ID, value=full event dict
                     producer.send(
                         KAFKA_TOPIC,
                         key=event.get("id"),
                         value=event,
                     )
-                    print(f"  → {event['type']:20s} | {event['repo']['name']}")
-
-                # Flush ensures all buffered messages are actually sent
                 producer.flush()
-                print(f"[kafka] {len(events)} messages sent to '{KAFKA_TOPIC}'")
+                log.info("events_published", count=len(events), topic=KAFKA_TOPIC)
 
             else:
-                print("[poll] No new events (304)")
+                log.debug("no_new_events", reason="304 Not Modified")
 
         except requests.exceptions.ConnectionError:
-            print("[error] Cannot connect to GitHub API.")
+            log.warning("github_connection_error")
         except requests.exceptions.Timeout:
-            print("[error] Request timed out.")
-        except requests.exceptions.HTTPError as e:
-            print(f"[error] HTTP error: {e}")
+            log.warning("github_timeout")
+        except requests.exceptions.HTTPError as exc:
+            log.warning("github_http_error", status=exc.response.status_code)
 
-        print(f"[poll] Waiting {POLL_INTERVAL} seconds...\n")
         time.sleep(POLL_INTERVAL)
 
 
