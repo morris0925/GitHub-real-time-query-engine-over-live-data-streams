@@ -128,7 +128,10 @@ def run_consumer() -> None:
                         continue
 
                     if result.metrics:
-                        log.debug("event_metrics", event_type=event_type, **result.metrics)
+                        # Strip "event_type" from metrics to avoid keyword collision
+                        # (DefaultProcessor includes it; we always pass it explicitly)
+                        extra = {k: v for k, v in result.metrics.items() if k != "event_type"}
+                        log.debug("event_metrics", event_type=event_type, **extra)
 
                     batch.append(result.event)
                     # ─────────────────────────────────────────────────────

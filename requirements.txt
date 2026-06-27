@@ -9,6 +9,7 @@ python-dotenv==1.0.1
 # Storage
 pyarrow==15.0.2
 duckdb==0.10.3
+pytz==2024.1
 
 # Dashboard
 rich==13.7.1

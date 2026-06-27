@@ -48,13 +48,9 @@ class PushEventProcessor(EventProcessor):
                 event_id=str(event.get("id", "")),
             )
 
-        commits = payload.get("commits")
-        if commits is None:
-            raise ValidationError(
-                event_type=self.event_type,
-                reason="payload.commits is missing",
-                event_id=str(event.get("id", "")),
-            )
+        # GitHub's public events API omits commits for large pushes (>20 commits)
+        # or force-pushes. Treat missing/null as empty list instead of an error.
+        commits = payload.get("commits") or []
 
         # Strip "refs/heads/" to get a readable branch name
         ref: str = payload["ref"]

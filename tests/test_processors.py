@@ -151,12 +151,12 @@ class TestPushEventProcessor:
             get_processor("PushEvent").process(event)
         assert "ref" in str(exc_info.value)
 
-    def test_missing_commits_raises_validation_error(self):
+    def test_missing_commits_treated_as_empty(self):
+        """GitHub omits commits on large pushes — should be valid, count = 0."""
         event = push_event()
         del event["payload"]["commits"]
-        with pytest.raises(ValidationError) as exc_info:
-            get_processor("PushEvent").process(event)
-        assert "commits" in str(exc_info.value)
+        result = get_processor("PushEvent").process(event)
+        assert result.metrics["commit_count"] == 0
 
     def test_missing_top_level_id_raises_validation_error(self):
         event = push_event()
