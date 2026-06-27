@@ -14,32 +14,50 @@ A real-time data pipeline that polls the GitHub Events API, pushes events into K
 | Container | Docker + Docker Compose (Kafka + Zookeeper) |
 
 ## Current Project State
-Days 1–9 complete and pushed to GitHub. All layers implemented and tested (75 tests passing).
+Days 1–11 complete and pushed to GitHub. All layers implemented and tested (155 tests passing).
 
 ```
 streamlens/
 ├── src/
 │   ├── producer.py           # GitHub Events → Kafka ✅
-│   ├── consumer.py           # Kafka → Parquet (micro-batch) ✅
+│   ├── consumer.py           # Kafka → Parquet (micro-batch) + DLQ ✅
+│   ├── cli.py                # Click CLI — events/stats/repos/lag/dlq ✅
 │   ├── processors/           # Per-event-type validation + enrichment ✅
 │   ├── storage/
 │   │   ├── schema.py         # PyArrow schema (source of truth) ✅
 │   │   ├── writer.py         # Event-time partitioning + watermark ✅
 │   │   ├── reader.py         # DuckDB query functions ✅
 │   │   ├── compaction.py     # Small file merging ✅
+│   │   ├── dlq_writer.py     # Dead Letter Queue Parquet writer ✅
+│   │   ├── jsonl_writer.py   # JSONL writer (benchmark comparison) ✅
 │   │   └── queries/          # SQL files > 5 lines ✅
 │   └── dashboard/
 │       └── dashboard.py      # Rich 4-panel terminal UI ✅
-├── tests/                    # 75 tests ✅
+├── tests/                    # 155 tests ✅
+├── scripts/
+│   └── benchmark.py          # Parquet vs JSONL benchmark ✅
+├── results/
+│   └── benchmark_results.json
 ├── docs/
-│   ├── devlog.md             # Daily engineering log
-│   ├── interview_narrative.md
-│   └── schema_changelog.md
+│   ├── devlog.md             # Daily engineering log (English)
+│   ├── design-faq.md         # Engineering Q&A for interviews (English)
+│   ├── schema_changelog.md   # Schema version history (English)
+│   └── benchmark.md          # Benchmark report
 ├── .github/workflows/ci.yml  # GitHub Actions (pytest on push) ✅
 ├── .env.example
 ├── docker-compose.yml
 └── requirements.txt
 ```
+
+## Language Rules
+
+**All output must be in English.** This is a portfolio project targeting US companies.
+- All code comments, docstrings, and inline documentation: English only
+- All docs/ files (devlog, schema changelog, benchmark, etc.): English only
+- Commit messages: English only
+- README and any user-facing text: English only
+
+The only exception is this CLAUDE.md file itself and private local notes — but even those should prefer English.
 
 ## Coding Rules
 

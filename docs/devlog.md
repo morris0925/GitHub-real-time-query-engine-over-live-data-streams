@@ -1,47 +1,47 @@
 # StreamLens — Dev Log
 
-每天做了什麼、為什麼這樣做、遇到什麼問題。給未來的自己看。
+Daily record of what was built, why decisions were made, and what was learned.
 
 ---
 
-## Day 1 — 環境建置 & Docker
+## Day 1 — Environment Setup & Docker
 
-**目標：** 讓 Kafka 在本機跑起來。
+**Goal:** Get Kafka running locally.
 
-**做了什麼：**
-- 建立整個 `streamlens/` 專案資料夾結構
-- 寫 `docker-compose.yml`：兩個服務 — Zookeeper（Kafka 的依賴）和 Kafka broker
-- Kafka container 加了 health check，確保 Kafka 真的 ready 之後才算啟動成功
-- 用 named volume 讓 Kafka 的資料在 `docker-compose down` 後不會消失
-- 驗證：`docker-compose up -d` → 兩個 container 都 healthy → `docker-compose down`
+**What was done:**
+- Created the `streamlens/` project folder structure
+- Wrote `docker-compose.yml`: two services — Zookeeper (Kafka's dependency) and the Kafka broker
+- Added a health check to the Kafka container to ensure it's truly ready before marking it as started
+- Used a named volume so Kafka data persists across `docker-compose down`
+- Verified: `docker-compose up -d` → both containers healthy → `docker-compose down`
 
-**學到什麼：**
-- Kafka 需要 Zookeeper 來管理 broker 的 metadata（誰是 leader、哪些 partition 在哪裡）
-- Docker health check 讓 `depends_on` 能等 Kafka 真的好了才啟動其他服務
-- Named volume vs bind mount：named volume 由 Docker 管理，比較乾淨
+**What was learned:**
+- Kafka requires Zookeeper to manage broker metadata (who is the leader, which partitions are where)
+- Docker health checks allow `depends_on` to wait until Kafka is genuinely ready before starting dependent services
+- Named volumes vs bind mounts: named volumes are managed by Docker and cleaner for this use case
 
-**關鍵設定（docker-compose.yml）：**
-- `KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092` — 告訴 producer/consumer 要連哪裡
-- `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1` — 單節點開發用，不需要 replication
+**Key configuration (docker-compose.yml):**
+- `KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092` — tells producers/consumers where to connect
+- `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1` — single-node dev setup, no replication needed
 
 ---
 
-## Day 2 — 認識 GitHub Events API
+## Day 2 — GitHub Events API
 
-**目標：** 用 Python 打 GitHub API，搞清楚資料長什麼樣子。
+**Goal:** Hit the GitHub API with Python and understand the data structure.
 
-**做了什麼：**
-- 寫一個簡單腳本直接呼叫 `https://api.github.com/events`
-- 探索 response 結構：每個 event 有 `id`, `type`, `actor`, `repo`, `payload`, `created_at`
-- 發現 GitHub 的 ETag 機制：同樣的資料第二次呼叫會回傳 304 Not Modified，省頻寬
-- 實作 ETag 快取：把上次的 ETag 存起來，下次帶在 `If-None-Match` header 裡
+**What was done:**
+- Wrote a simple script to call `https://api.github.com/events`
+- Explored the response structure: each event has `id`, `type`, `actor`, `repo`, `payload`, `created_at`
+- Discovered GitHub's ETag mechanism: a second call for unchanged data returns 304 Not Modified
+- Implemented ETag caching: store the last ETag and pass it in `If-None-Match` on subsequent requests
 
-**學到什麼：**
-- GitHub Events API 是 public 的，不需要 token（但有 rate limit：60 req/hr）
-- ETag 是 HTTP 的條件式請求機制 — server 說「這份資料的版本號是 XYZ」，client 下次帶著版本號問「還是 XYZ 嗎？」，沒變就回 304 + 空 body
-- GitHub event types：最常見的是 `PushEvent`、`WatchEvent`（star）、`CreateEvent`（新 branch/repo）
+**What was learned:**
+- The GitHub Events API is public — no token required (but rate-limited to 60 req/hr)
+- ETag is HTTP's conditional request mechanism: the server says "this resource's version is XYZ," the client asks next time "is it still XYZ?" — if yes, 304 + empty body
+- Most common GitHub event types: `PushEvent`, `WatchEvent` (star), `CreateEvent` (new branch/repo)
 
-**資料結構（簡化版）：**
+**Data structure (simplified):**
 ```json
 {
   "id": "12345678901",
@@ -58,85 +58,81 @@
 
 ## Day 3 — GitHub Events → Kafka Producer
 
-**目標：** 把 API 抓到的 events 推進 Kafka topic。
+**Goal:** Push API events into a Kafka topic.
 
-**做了什麼：**
-- 寫 `src/producer.py`：每 5 秒 poll GitHub API，把每個 event 送到 `github-events` topic
-- 用 `kafka-python` 的 `KafkaProducer`，設定 `value_serializer` 自動把 dict 轉成 JSON bytes
-- Message key = `event["id"]`（GitHub 的 event ID），讓 Kafka 把相同 key 的訊息路由到同一個 partition
-- 錯誤處理：`NoBrokersAvailable` 時直接印出提示（Docker 沒開）
-- 設定：broker address 和 topic name 都 hardcode 在這個版本（TODO: 之後換 env var）
+**What was done:**
+- Wrote `src/producer.py`: polls GitHub every 5 seconds, sends each event to the `github-events` topic
+- Used `kafka-python`'s `KafkaProducer` with a `value_serializer` that automatically converts dicts to JSON bytes
+- Message key = `event["id"]` (GitHub's event ID), so Kafka routes events with the same ID to the same partition
+- Error handling: `NoBrokersAvailable` prints a hint (Docker not running)
+- Config: broker address and topic name hardcoded in this version (TODO: switch to env vars)
 
-**學到什麼：**
-- Kafka 的核心概念：Producer → Topic → Consumer
-- Topic 就是一個有名字的 log，可以有多個 partition
-- `producer.flush()` 確保 buffer 裡的訊息都真的送出去（不然程式結束時可能丟訊息）
-- Serialization：Kafka 只存 bytes，所以 Python dict 要先 `json.dumps()` 再 `.encode("utf-8")`
+**What was learned:**
+- Kafka's core concept: Producer → Topic → Consumer
+- A topic is a named log that can have multiple partitions
+- `producer.flush()` ensures buffered messages are actually sent before the process exits
+- Serialization: Kafka stores only bytes, so Python dicts must be `json.dumps()`-ed then `.encode("utf-8")`-ed
 
-**為什麼每個 event 是獨立的訊息：**
-GitHub API 一次回傳最多 30 個 events 的 array，但我們把每個 event 拆成獨立的 Kafka message。這樣 consumer 可以獨立處理每一個，也讓 partition 更均勻。
+**Why each event is a separate message:**
+The GitHub API returns up to 30 events per call as an array, but we publish each event as an independent Kafka message. This lets the consumer process them individually and distributes them more evenly across partitions.
 
 ---
 
-## Day 4 — Storage 層 + Kafka Consumer
+## Day 4 — Storage Layer + Kafka Consumer
 
-**目標：** 把 Kafka 裡的 events 寫成 Parquet 檔案，並建立 DuckDB 查詢層。
-
-**做了什麼：**
+**Goal:** Write Kafka events to Parquet files and build the DuckDB query layer.
 
 ### `src/storage/schema.py`
-- 定義 `GITHUB_EVENT_SCHEMA`：一個 PyArrow schema，10 個欄位
-- 把原本 nested 的 JSON（`actor.login`, `repo.name`）壓平成獨立欄位
-- 複雜的 `payload` 存成 JSON string（不然要為每種 event type 寫不同 schema）
-- 多了一個 `ingested_at` 欄位（consumer 寫入的時間），可以和 `created_at` 相減算 pipeline lag
+- Defined `GITHUB_EVENT_SCHEMA`: a PyArrow schema with 10 fields
+- Flattened nested JSON fields (`actor.login`, `repo.name`) into top-level columns
+- Stored complex `payload` as a JSON string (avoids needing a different schema per event type)
+- Added `ingested_at` field (when the consumer wrote the event) to enable pipeline lag calculation
 
 ### `src/storage/writer.py`
-- `flatten_event()`：把一個 raw GitHub event dict 轉成符合 schema 的 flat dict
-- `write_batch()`：一批 events → PyArrow Table → Parquet 檔
-- Date partition：`data/events/date=2026-06-25/part-<uuid>.parquet`
-- Snappy 壓縮（快、壓縮率中等，適合 analytics workload）
-- UUID 檔名確保並行寫入不會互相覆蓋
+- `flatten_event()`: converts one raw GitHub event dict into a flat dict matching the schema
+- `write_batch()`: a list of events → PyArrow Table → Parquet file
+- Date partitioning: `data/events/date=2026-06-25/part-<uuid>.parquet`
+- Snappy compression (fast, moderate compression ratio — appropriate for analytics workloads)
+- UUID filenames prevent collisions from concurrent writes
 
 ### `src/storage/reader.py`
-- DuckDB 單例連線（module-level singleton）— 一個 connection 用到底，不重複開
-- `get_recent_events()` — 最新 N 筆，給 dashboard event feed
-- `get_event_counts_by_type()` — 按 type 分組計數，給 dashboard stats panel
-- `get_top_repos()` — 最活躍的 repo，給 dashboard top repos panel
-- `get_total_event_count()` — 總數，給 status bar
-- 查詢用 DuckDB glob：`read_parquet('data/events/**/*.parquet')` 一次掃所有 partition
+- DuckDB module-level singleton connection — one connection reused for all queries
+- `get_recent_events()` — most recent N events, for the dashboard feed
+- `get_event_counts_by_type()` — grouped counts by type, for the stats panel
+- `get_top_repos()` — most active repositories, for the top repos panel
+- `get_total_event_count()` — total count, for the status bar
+- Queries use a DuckDB glob: `read_parquet('data/events/**/*.parquet')` scans all partitions at once
 
-### `src/storage/queries/` — 三個 SQL 檔
+### `src/storage/queries/` — three SQL files
 - `event_counts_by_type.sql`
 - `top_repos.sql`
 - `recent_events.sql`
-- 超過 5 行的 SQL 獨立成 .sql 檔，用 `Path.read_text()` 載入
+- SQL queries longer than 5 lines are extracted to `.sql` files and loaded with `Path.read_text()`
 
 ### `src/consumer.py`
-- `enable_auto_commit=False` — 手動 commit offset，只在 Parquet 寫成功後才 commit
-- Micro-batch：累積 100 筆 or 30 秒，擇一觸發 flush
-- 錯誤處理：`StorageWriteError` → 不 commit（讓 Kafka 重送），其他 Exception → raise
-- `auto_offset_reset="earliest"` — 第一次啟動從頭讀
+- `enable_auto_commit=False` — offsets committed manually, only after a successful Parquet write
+- Micro-batch: flushes when 100 messages are accumulated OR 30 seconds have elapsed, whichever comes first
+- Error handling: `StorageWriteError` → do not commit (let Kafka redeliver); other exceptions → raise
+- `auto_offset_reset="earliest"` — on first run, start from the beginning of the topic
 
 ### `tests/test_storage.py`
-- 23 個 unit test，全部通過
-- 涵蓋：schema 驗證、flatten_event 邊界情況（壞 timestamp、缺 actor/payload）、write_batch round-trip、reader 所有函式
-- 用 pytest `tmp_path` fixture，測試不碰真實 `data/` 目錄
+- 23 unit tests, all passing
+- Coverage: schema validation, `flatten_event` edge cases (bad timestamps, missing actor/payload), `write_batch` round-trip, all reader functions
+- Uses pytest `tmp_path` fixture — tests never touch the real `data/` directory
 
-**關鍵設計決策：**
-- 為什麼 date partition？DuckDB 可以做 partition pruning — 只查今天的資料時，它完全不看其他資料夾
-- 為什麼 `ingested_at`？可以量測 pipeline lag（= `ingested_at - created_at`）
-- 為什麼 payload 存成 JSON string 而不是 nested struct？GitHub 有 30+ 種 event type，每種 payload 結構不同，統一存 string 最簡單，要用時再 `json.loads()`
+**Key design decisions:**
+- Why date partitioning? DuckDB can do partition pruning — when querying only today's data, it skips all other directories entirely
+- Why `ingested_at`? Enables pipeline lag measurement (`ingested_at - created_at`)
+- Why store payload as a JSON string rather than a nested struct? GitHub has 30+ event types each with a different payload structure; a unified string is simplest, with `json.loads()` when field-level access is needed
 
 ---
 
-## Day 5 — Rich 終端機 Dashboard
+## Day 5 — Rich Terminal Dashboard
 
-**目標：** 用 Rich 把 DuckDB 查詢結果變成一個會自動重整的終端機畫面。
-
-**做了什麼：**
+**Goal:** Turn DuckDB query results into an auto-refreshing terminal UI using Rich.
 
 ### `src/dashboard/dashboard.py`
-四個面板的 Layout：
+Four-panel layout:
 ```
 ┌─ ● StreamLens  │  topic: github-events  │  ↻ every 4s ─────────────┐
 ├──── Live Event Feed (last 20) ───┬─── Event Types (last 60 min) ────┤
@@ -150,27 +146,27 @@ GitHub API 一次回傳最多 30 個 events 的 array，但我們把每個 event
 ╭─ Total events: 7  │  Updated: 14:17:49 UTC  │  Ctrl+C to exit ──────╮
 ```
 
-**細節：**
-- `rich.live.Live(screen=True)` — 全螢幕接管，退出後還原終端機
-- `refresh_per_second=4`，但實際資料更新是 sleep(4) 控制的
-- 每個 event type 有自己的顏色（`PushEvent` = 綠、`WatchEvent` = 黃、`PullRequestEvent` = 藍...）
-- Stats panel 有 ASCII bar chart（`█` 字元），讓數字大小一眼看出來
-- 空資料時顯示 "no data yet"，不會 crash
-- Header 的 ● 點：有資料時綠色，沒資料時灰色
+**Details:**
+- `rich.live.Live(screen=True)` — takes over the full terminal; restores it on exit
+- Data refreshes every 4 seconds via `time.sleep(4)`
+- Each event type has its own color (`PushEvent` = green, `WatchEvent` = yellow, `PullRequestEvent` = blue...)
+- Stats panel includes an ASCII bar chart (`█` characters) so relative magnitudes are immediately visible
+- Empty data shows "no data yet" — no crashes
+- Header dot `●`: green when data is present, gray when not
 
-**Rich Layout 結構：**
+**Rich Layout structure:**
 ```
 root (vertical)
-├── header   (size=3, 固定高度)
-├── body     (填滿剩餘空間)
+├── header   (size=3, fixed height)
+├── body     (fills remaining space)
 │   ├── left   (ratio=55, event feed)
 │   └── right  (ratio=45)
 │       ├── counts (ratio=45, event type stats)
 │       └── repos  (ratio=55, top repos)
-└── footer   (size=3, 固定高度)
+└── footer   (size=3, fixed height)
 ```
 
-**如何跑完整 pipeline：**
+**How to run the full pipeline:**
 ```bash
 # Terminal 1
 docker-compose up -d
@@ -185,47 +181,34 @@ PYTHONPATH=src python src/consumer.py
 PYTHONPATH=src python src/dashboard/dashboard.py
 ```
 
-**同時也建立了：**
-- `src/dashboard/__init__.py`
-- `src/storage/__init__.py`
-- `requirements.txt`（所有依賴版本固定）
-
 ---
 
----
+## Day 6 — Refactor + Compaction + Lag Monitoring
 
-## Day 6 — Refactor + Compaction + Lag 監控
-
-**目標：** 補上三個重要缺口：producer 的 hardcode、生產環境必備的 compaction、以及可以量化 pipeline 健康度的 lag 指標。
-
----
+**Goal:** Address three gaps: hardcoded producer config, compaction for production readiness, and a quantifiable pipeline health metric.
 
 ### 1. Refactor producer.py — env vars + structlog
 
-**改了什麼：**
-- 把 `KAFKA_BROKER = "localhost:9092"` 等三個 hardcode 常數全部換成 `os.getenv()` + `python-dotenv`
-- 新增支援 `GITHUB_TOKEN` 環境變數（有 token 的話 rate limit 從 60 req/hr 升到 5000 req/hr）
-- 把所有 `print()` 換成 `structlog`，輸出格式統一（timestamp + log level + key-value pairs）
+**What changed:**
+- Replaced three hardcoded constants (`KAFKA_BROKER = "localhost:9092"` etc.) with `os.getenv()` + `python-dotenv`
+- Added `GITHUB_TOKEN` env var support (raises rate limit from 60 to 5,000 req/hr)
+- Replaced all `print()` calls with `structlog` for consistent structured output
 
-**為什麼這樣改：**
-CLAUDE.md 本來就標記這是 TODO。更重要的是：如果你把這個 producer 包成 Docker image 部署，hardcode 的 broker address 直接讓它變成「只能在本機跑」的程式。env var 讓同一份 image 可以指向不同環境的 Kafka。
+**Why:** Hardcoded broker addresses make the producer impossible to deploy. Env vars let the same image target any environment.
 
 ---
 
-### 2. storage/compaction.py — 小檔案合併
+### 2. storage/compaction.py — small file merging
 
-**問題背景（Small File Problem）：**
+**The problem (Small File Problem):**
+The consumer flushes every 30 seconds — 2,880 small Parquet files per partition per day. Every DuckDB query must open and read the footer metadata of all 2,880 files before touching any actual data. The syscall overhead far exceeds the time spent reading data.
 
-Consumer 每 30 秒 flush 一次，一天下來就是 2,880 個小 Parquet 檔案。每次 DuckDB 執行 `SELECT COUNT(*) FROM read_parquet('data/events/**/*.parquet')` 時，它要打開、讀取 footer metadata、再關閉 2,880 個檔。這些 syscall 的開銷遠超過實際讀資料的時間。
-
-**解法：**
-
+**The solution:**
 ```
 Before:
   date=2026-06-25/
     part-a1b2.parquet   (50 rows)
     part-c3d4.parquet   (50 rows)
-    part-e5f6.parquet   (50 rows)
     ... × 2880
 
 After compact_partition():
@@ -233,211 +216,147 @@ After compact_partition():
     compacted-uuid.parquet  (144,000 rows)
 ```
 
-**關鍵細節：**
-- 先寫新檔案，成功後才刪舊檔案 — 確保資料不會在中途遺失
-- `min_files=2`：只有超過一個檔才值得合併（一個檔 compact 沒有意義）
-- `compacted-` 前綴：讓合併後的檔和原始 `part-` 檔一眼就分得清楚
-- `compact_all()` 掃所有 date partition，通常排 cron job 每天凌晨跑一次
+**Key details:**
+- Write the new file first; delete originals only after a successful write — no data loss on crash
+- `min_files=2`: only compact when more than one file exists
+- `compacted-` prefix: makes merged files visually distinguishable from originals
+- `compact_all()` scans all date partitions; typically scheduled as a nightly cron job
 
-**面試角度：**
-這就是 Delta Lake 的 `OPTIMIZE`、Apache Iceberg 的 `rewrite_data_files`、Spark 的 `coalesce()` 在做的事。同樣的問題在 S3 + Athena 架構下每次 query 的費用會隨檔案數線性增加（每個 `GetObject` API call 收費）。
+This is the same operation as Delta Lake's `OPTIMIZE`, Apache Iceberg's `rewrite_data_files`, and Spark's `coalesce()`.
 
 ---
 
-### 3. Lag 監控 — reader.py + dashboard
+### 3. Lag monitoring — reader.py + dashboard
 
-**新增 `get_avg_lag()`：**
-- 計算 `AVG(ingested_at - created_at)` — 也就是從 GitHub 記錄這個 event 到我們存進 Parquet 的平均延遲
-- SQL 放在 `storage/queries/avg_lag.sql`（符合「超過 5 行放 .sql 檔」的規則）
-- 同時回傳 min、max、sample_size
+**New `get_avg_lag()`:**
+- Computes `AVG(ingested_at - created_at)` — the average time from GitHub recording an event to us writing it to Parquet
+- SQL lives in `storage/queries/avg_lag.sql` (consistent with the "5-line rule")
+- Returns min, max, and sample_size alongside the average
 
-**Dashboard status bar 更新：**
+**Dashboard status bar update:**
 ```
-Before:  Total events: 1,234  │  Last updated: 14:17:36 UTC  │  Ctrl+C to exit
+Before:  Total events: 1,234  │  Last updated: 14:17:36 UTC
 After:   Total: 1,234 events  │  Lag: 28.4s avg (n=847)  │  Updated: ...
 ```
 
-Lag 顏色：
-- 綠色：< 30s（正常，等於 flush interval）
-- 黃色：30–60s（稍慢，可能 Kafka 積壓）
-- 紅色：> 60s（有問題）
+Lag color coding:
+- Green: < 30s (healthy — close to the flush interval)
+- Yellow: 30–60s (elevated — possible Kafka backlog)
+- Red: > 60s (problem)
 
-**為什麼 `ingested_at - created_at` 有意義：**
-- `created_at` = GitHub API 記錄的時間
-- `ingested_at` = 我們 consumer 寫入 Parquet 的時間
-- 兩者差值 = 「資料從來源到我們倉儲的延遲」= 業界說的 end-to-end pipeline latency
-- 如果 lag 突然升高，可能是：GitHub API 變慢、Kafka 積壓、consumer crash 過後重啟從頭讀
-
----
-
-**Tests：**
-- `tests/test_compaction.py` — 15 個 test
-  - `compact_partition`：output 只剩一個檔、名稱 `compacted-`、row count 不變、原始檔刪除、一個檔跳過
-  - `compact_all`：空目錄、多 partition
-  - Lag metric：無資料 → None、計算準確度（±5s 容差）、回傳欄位完整
-- 全部 38 tests 通過（23 舊 + 15 新）
+**Why `ingested_at - created_at` is meaningful:**
+- `created_at` = when GitHub recorded the event
+- `ingested_at` = when our consumer wrote it to Parquet
+- The difference = end-to-end pipeline latency from source to storage
 
 ---
 
-**今天之後的完整檔案結構：**
-```
-src/
-├── producer.py          ← refactored: env vars + structlog
-├── consumer.py
-├── storage/
-│   ├── schema.py
-│   ├── writer.py
-│   ├── reader.py        ← 新增 get_avg_lag()
-│   ├── compaction.py    ← 新增
-│   └── queries/
-│       ├── event_counts_by_type.sql
-│       ├── top_repos.sql
-│       ├── recent_events.sql
-│       └── avg_lag.sql  ← 新增
-└── dashboard/
-    └── dashboard.py     ← status bar 加上 lag 顯示
-tests/
-├── test_storage.py      (23 tests)
-└── test_compaction.py   (15 tests)  ← 新增
-```
-
----
+**Tests:** `tests/test_compaction.py` — 15 tests. Total: 38 passing (23 existing + 15 new).
 
 ---
 
 ## Day 7 — Late-Arriving Events + README
 
-**目標：** 解決 writer.py 的 partition 設計缺陷，並把整個 portfolio 包裝成一份讓面試官看得懂的 README。
+**Goal:** Fix the partition design flaw in writer.py, and package the project as a portfolio-grade README.
 
----
+### 1. writer.py rewrite — Event-Time Partitioning + Watermark
 
-### 1. writer.py 大改 — Event-Time Partitioning + Watermark
+**The original problem:**
 
-**原本的問題：**
-
-Day 4 寫的 writer.py 把所有 event 都寫進「今天」的 partition：
-
+Day 4's writer placed all events in today's partition:
 ```python
-today_str = ingested_at.strftime("%Y-%m-%d")   # ← 以處理時間為準
+today_str = ingested_at.strftime("%Y-%m-%d")   # based on processing time
 partition_dir = data_dir / f"date={today_str}"
 ```
 
-這表示：
-- 一個 `created_at=昨天` 的 event 會被寫進 `date=今天/`
-- 之後查「昨天的資料」時，DuckDB 直接跳過昨天的 partition，這筆資料就消失了
+This meant:
+- An event with `created_at=yesterday` landed in `date=today/`
+- A query for "yesterday's data" had DuckDB skip yesterday's partition entirely via pruning — the event disappeared
 
-**修法 — Event-Time Partitioning with Watermark：**
-
+**Fix — Event-Time Partitioning with Watermark:**
 ```
-事件年齡 ≤ 24 小時  →  寫進 date=<created_at 的日期>/
-事件年齡 > 24 小時  →  寫進 date=late/（隔離區）
-```
-
-核心函式 `_partition_key(created_at, ingested_at, threshold_hours)` 決定每個 event 該去哪個 partition。
-
-**API 也改了：**
-`write_batch()` 現在回傳 `list[Path]` 而不是單一 `Path`，因為同一批 message 可能橫跨多個日期（例如 consumer 重啟後，重播昨天和今天的 event）。
-
-**為什麼叫 Watermark：**
-"Watermark" 是 streaming 系統的術語，代表「我們認為這個時間點之前的所有 event 都到齊了」。超過 watermark 的 late event 用 side output 處理（我們叫 `date=late/`）。Apache Flink、Spark Structured Streaming、Apache Beam 都用這個機制。
-
-**Late partition 的用途：**
-`date=late/` 不是垃圾桶，是隔離區。未來可以：
-- 檢視裡面有什麼（反常現象？API 延遲問題？）
-- 用 `compaction.py` 合併後轉移到正確的 date partition（人工修正）
-
-**Tests 新增 `TestLateArrivingEvents`（5 個）：**
-- 近期 event → date partition
-- 超過 watermark → date=late/
-- 混合批次 → 分成兩個檔案
-- late partition 的 row count 正確
-- 剛好在 watermark 內的 event 不算 late
-
----
-
-### 2. README.md — Portfolio 門面
-
-寫了一份完整的 README，包含：
-- ASCII architecture diagram（面試官打開 GitHub 第一眼看到的東西）
-- Quick Start（3 個 terminal 跑起完整 pipeline）
-- 所有 env var 的 table
-- 完整 project structure
-- **Engineering Design Decisions** — 這是核心：解釋為什麼做這些技術選擇，不只是「我用了 Kafka」，而是「為什麼用 Kafka」
-
-Design decisions 涵蓋的四個問題（面試常問）：
-1. **為什麼用 Kafka？** → 解耦 producer/consumer、rate limit 保護、replay buffer
-2. **為什麼 Parquet + DuckDB 而不是資料庫？** → 類比 S3 + Athena，columnar storage 的 analytics 優勢
-3. **為什麼 partition by event time 而不是 ingestion time？** → 正確性 vs 複雜度，watermark 的取捨
-4. **為什麼要 compact？** → Small file problem，2,880 files → 1 file
-
----
-
-**Tests：** 43 passed（+5 新的 late-event tests）
-
-**今天改動的檔案：**
-```
-src/storage/writer.py    ← 重寫：event-time partitioning + watermark
-src/consumer.py          ← 小改：適配 list[Path] return type
-tests/test_storage.py    ← 更新 write_batch tests + 新增 TestLateArrivingEvents
-README.md                ← 完整重寫
+Event age ≤ 24 hours  →  write to date=<created_at date>/
+Event age > 24 hours  →  write to date=late/  (quarantine)
 ```
 
----
+The core function `_partition_key(created_at, ingested_at, threshold_hours)` decides which partition each event belongs in.
+
+**API change:**
+`write_batch()` now returns `list[Path]` instead of a single `Path`, because a single batch may span multiple dates (e.g. a consumer restart replaying both yesterday's and today's events).
+
+**Why "watermark":**
+"Watermark" is the streaming systems term for "we consider all events before this point to have arrived." Late events beyond the watermark go to a side output (`date=late/`). Apache Flink, Spark Structured Streaming, and Apache Beam all use this mechanism.
+
+**New tests `TestLateArrivingEvents` (5 tests):**
+- Recent event → date partition
+- Event past watermark → `date=late/`
+- Mixed batch → two separate files
+- Late partition row count is correct
+- Event just inside the watermark is not classified as late
 
 ---
 
-## Day 8 — processors/ 層 + .env.example
+### 2. README.md
 
-**目標：** 建立 CLAUDE.md 計劃中最後一個還沒蓋的架構塊：event-type-specific processor 層。順便補 `.env.example` 讓初次使用的人不用猜。
+Complete rewrite covering:
+- ASCII architecture diagram
+- Quick Start (three terminals to run the full pipeline)
+- Environment variable reference table
+- Full project structure
+- **Engineering Design Decisions** — the key section: explains why each technical choice was made, not just what was used
+
+Design decisions cover four questions that come up in data engineering interviews:
+1. **Why Kafka?** — decoupling, rate limit protection, replay buffer
+2. **Why Parquet + DuckDB instead of a database?** — analytics vs transactional, columnar storage advantages, S3 + Athena analogy
+3. **Why partition by event time instead of ingestion time?** — correctness vs complexity, watermark tradeoff
+4. **Why compact?** — small file problem, 2,880 files → 1 file
 
 ---
 
-### 1. processors/ 層
+**Tests:** 43 passing (+5 late-event tests).
 
-**問題背景：**
+---
 
-GitHub Events API 有 30+ 種 event type，每種的 `payload` 結構完全不同：
-- `PushEvent` payload 有 `commits` array 和 `ref`
-- `WatchEvent` payload 只有 `action: "started"`
-- `PullRequestEvent` payload 有完整的 PR 物件
+## Day 8 — processors/ Layer
 
-如果把所有 event type 的 validate/enrich 邏輯全塞進 consumer.py，就會變成一大坨 `if event_type == "PushEvent": ... elif event_type == "WatchEvent": ...`，很難維護、很難測試。
+**Goal:** Build the last missing architectural block from the plan: a per-event-type processor layer.
 
-**解法：Strategy Pattern**
+### processors/ layer
 
-每個 event type 一個 processor 類別，都繼承自同一個 abstract base class：
+**Background:**
+GitHub's Events API has 30+ event types, each with a completely different `payload` structure. Putting all validation and enrichment logic into consumer.py produces a tangle of `if event_type == "PushEvent": ... elif event_type == "WatchEvent": ...` that's hard to maintain and test.
+
+**Solution: Strategy Pattern**
+
+One processor class per event type, all inheriting from the same abstract base class:
 
 ```
 processors/
-├── __init__.py          # Registry + get_processor()
-├── base.py              # EventProcessor ABC, ValidationError, ProcessorResult
-├── push_event.py        # PushEventProcessor
-├── watch_event.py       # WatchEventProcessor
-├── pull_request_event.py# PullRequestEventProcessor
-└── default.py           # DefaultProcessor (fallback for 未知 type)
+├── __init__.py           # Registry + get_processor()
+├── base.py               # EventProcessor ABC, ValidationError, ProcessorResult
+├── push_event.py         # PushEventProcessor
+├── watch_event.py        # WatchEventProcessor
+├── pull_request_event.py # PullRequestEventProcessor
+└── default.py            # DefaultProcessor (fallback for unknown types)
 ```
 
-**每個 Processor 做兩件事：**
-1. **Validate** — 確認這個 event type 必要的欄位都在，不在就 `raise ValidationError`
-2. **Enrich** — 從 payload 提取有用的 metrics（不存入 Parquet，只用於 logging/monitoring）
+**What each processor does:**
+1. **Validate** — check that required fields are present; raise `ValidationError` if not
+2. **Enrich** — extract useful metrics from the payload (not written to Parquet; used for logging/monitoring)
 
-**ProcessorResult dataclass：**
+**`ProcessorResult` dataclass:**
 ```python
 @dataclass
 class ProcessorResult:
-    event:   dict   # original event (可能加了 enrichment)
+    event:   dict   # original event (possibly enriched)
     metrics: dict   # extracted metrics (commit_count, branch, is_merged...)
-    skipped: bool   # True 的話 consumer 跳過這筆不存
+    skipped: bool   # if True, consumer does not store this event
 ```
 
-**Registry + Singleton：**
-`get_processor("PushEvent")` 會回傳 cached `PushEventProcessor` instance。未知的 type 回傳 `DefaultProcessor`（pass-through，不丟資料）。新增 processor 只需要：
-1. 寫新的 processor class
-2. 加進 `REGISTRY` dict
-3. 寫測試
-→ consumer.py 完全不需要改
+**Registry + singleton:**
+`get_processor("PushEvent")` returns a cached `PushEventProcessor` instance. Unknown types return `DefaultProcessor` (pass-through — no data dropped). Adding a new processor requires only: write the class, add to `REGISTRY`, write tests. consumer.py never changes.
 
-**PushEventProcessor 提取的 metrics 範例：**
+**`PushEventProcessor` metrics example:**
 ```python
 {
     "commit_count":      3,
@@ -447,234 +366,152 @@ class ProcessorResult:
 }
 ```
 
-**PullRequestEventProcessor 的 is_merged 邏輯：**
-GitHub 沒有單獨的 "MergedEvent"。判斷一個 PR 是被 merge 還是被 close 的方式：
+**`PullRequestEventProcessor` `is_merged` logic:**
+GitHub has no separate "MergedEvent". Detecting whether a PR was merged vs closed:
 ```python
 is_merged = (action == "closed") and bool(pr.get("merged"))
 ```
 
-**consumer.py 的改動：**
-在 poll loop 裡加了 processor 層：
+**consumer.py change:**
+Added the processor layer inside the poll loop:
 ```python
 result = get_processor(event["type"]).process(raw_event)
-# ValidationError → log + skip（不加進 batch）
-# result.skipped → 同樣略過
-# 成功 → batch.append(result.event)
+# ValidationError → log + skip (do not add to batch)
+# result.skipped → also skip
+# success → batch.append(result.event)
 ```
-offset commit 邏輯不變：write_batch 成功後才 commit。
+Offset commit logic unchanged: only commit after write_batch succeeds.
 
 ---
 
-### 2. .env.example
+**Tests:** `tests/test_processors.py` — 32 new tests covering the registry, every processor's valid/invalid paths, and `ValidationError` structure.
 
-所有 env var 都列出來，有預設值和簡短說明，包含 `GITHUB_TOKEN` 的申請連結。使用者 `cp .env.example .env` 就能直接跑。
-
----
-
-**Tests：** `tests/test_processors.py` — 32 個新 tests，涵蓋 Registry、每個 processor 的 valid/invalid 路徑、ValidationError 結構。
-
-全套 **75 passed**（43 舊 + 32 新）。
-
----
-
-**今天之後的完整架構（CLAUDE.md 計劃 100% 完成）：**
-```
-src/
-├── producer.py
-├── consumer.py              ← 整合 processors 層
-├── processors/              ← 新增（完成 CLAUDE.md 計劃）
-│   ├── __init__.py
-│   ├── base.py
-│   ├── push_event.py
-│   ├── watch_event.py
-│   ├── pull_request_event.py
-│   └── default.py
-├── storage/
-│   ├── schema.py
-│   ├── writer.py
-│   ├── reader.py
-│   ├── compaction.py
-│   └── queries/
-└── dashboard/
-    └── dashboard.py
-tests/
-├── test_storage.py     (43 tests)
-├── test_compaction.py  (15 tests)
-└── test_processors.py  (32 tests)  ← 新增
-```
-
----
+Total: **75 passing** (43 existing + 32 new).
 
 ---
 
 ## Day 9 — Interview Narrative + Schema Changelog + Git
 
-**目標：** 把 portfolio 收尾 — 用第一人稱寫面試準備文件、補上 schema 演進記錄、把全部程式碼 push 上 GitHub。
+**Goal:** Wrap up the portfolio — write interview preparation docs, add schema history, push everything to GitHub.
 
----
+### docs/design-faq.md
+Complete interview preparation document with answers in first person. Each question has a short version (15-second answer) and an expanded version (3–5 minute deep dive).
 
-### 1. docs/interview_narrative.md
-
-完整的面試準備文件，每個問題有「一句話版本」（15 秒電梯答案）和「展開版本」（3–5 分鐘深入討論）。
-
-**涵蓋的問題：**
-- "Tell me about a project you built." — pipeline 整體介紹
-- "Why Kafka?" — 解耦、rate limit 保護、replay、可擴展性
-- "Why Parquet + DuckDB?" — analytics vs transactional，columnar 格式，S3+Athena 類比
+Questions covered:
+- "Tell me about a project you built." — full pipeline overview
+- "Why Kafka?" — decoupling, rate limit protection, replay, scalability
+- "Why Parquet + DuckDB?" — analytics vs transactional, columnar format, S3+Athena analogy
 - "How do you handle late-arriving events?" — event-time partitioning + watermark + side output
-- "What's the small file problem?" — syscall overhead + compaction 解法，類比 Delta Lake OPTIMIZE
-- "How do you ensure data isn't lost?" — at-least-once，offset commit ordering，deduplication 策略
-- "What would you do differently?" — asyncio producer、schema registry、Prometheus metrics
-- "What did you learn?" — Kafka partition 原理、Parquet footer/predicate pushdown、watermark 的本質是 tradeoff
+- "What's the small file problem?" — syscall overhead + compaction solution, Delta Lake OPTIMIZE analogy
+- "How do you ensure data isn't lost?" — at-least-once, offset commit ordering, deduplication strategy
+- "What would you do differently?" — asyncio producer, schema registry, Prometheus metrics
+- "What did you learn?" — Kafka partition mechanics, Parquet footer/predicate pushdown, watermark as a tradeoff
+
+### docs/schema_changelog.md
+Records:
+- **v1.0.0** (Day 4): initial 10-field schema, `ingested_at` for lag calculation, rationale for JSON string payload
+- **v1.1.0** (Day 7): schema unchanged but partition strategy switched to event-time + watermark
+- **Candidate future changes**: `actor_type` (human vs bot), `org_login` (organization)
+- **Migration strategies**: forward-only (add nullable fields) vs backfill (change types)
+
+### Git
+Pushed to `morris0925/GitHub-real-time-query-engine-over-live-data-streams`. 75 tests passing.
 
 ---
 
-### 2. docs/schema_changelog.md
+## Day 10 — CLI, Extended Processors, Dead Letter Queue
 
-記錄了：
-- **v1.0.0**（Day 4）：初始 10 欄位 schema，加了 `ingested_at` 用於 lag 計算，`payload` 存 JSON string 的原因
-- **v1.1.0**（Day 7）：Schema 本身沒變，但 partition 策略改為 event-time + watermark — 記錄在 changelog 是因為它影響了資料的邏輯組織
-- **未來候選變更**：`actor_type`（人 vs bot）、`org_login`（組織）
-- **Migration 策略**：forward-only（加 nullable 欄位）vs backfill（改型別）
+**Goal:** Upgrade the portfolio from "runs correctly" to "usable, observable, and extensible."
 
----
+### 1. src/cli.py — interactive query interface
 
-### 3. Git
+**Why a CLI:**
+The Rich dashboard is good for continuous monitoring. For quick one-off questions — "what events came in the last 10 minutes?" or "what's the lag right now?" — a CLI is faster and more scriptable. It wraps the DuckDB reader as a one-shot query tool.
 
-Repo 已存在（`morris0925/GitHub-real-time-query-engine-over-live-data-streams`），之前有 `.git/index.lock` 衝突（被本機 editor 鎖住），已提供手動解鎖指令。
-
-Commit message 涵蓋 Day 4–9 全部工作，75 tests passing。
-
----
-
-**Day 9 後的完整 docs/ 結構：**
-```
-docs/
-├── devlog.md               ← 每天工程日誌（本檔）
-├── interview_narrative.md  ← 面試問答準備
-└── schema_changelog.md     ← Schema 演進記錄
-```
-
----
-
----
-
----
-
-## Day 10 — CLI、擴充 Processors、Dead Letter Queue
-
-**目標：** 把 portfolio 從「能跑」升級到「好用、可觀測、可擴充」。三個功能同時推進：互動式查詢 CLI、更完整的 processor 覆蓋、以及讓破損 event 不再靜默消失的 DLQ。
-
----
-
-### 1. src/cli.py — 互動式查詢介面
-
-**為什麼要 CLI：**
-
-Rich dashboard 適合盯著看，但有時候你只想問一個快問題——「這 10 分鐘進來了哪些 event？」或者「lag 現在多少？」——不需要啟動整個 TUI。CLI 把 DuckDB reader 包成一次性查詢，是 data engineer 日常用來 debug pipeline 的工具。
-
-**五個子命令：**
-
+**Five subcommands:**
 ```bash
-python src/cli.py events              # 最新 20 筆 event
+python src/cli.py events              # most recent 20 events
 python src/cli.py events --type PushEvent --limit 50
-python src/cli.py stats --since 30   # 最近 30 分鐘各 type 計數
-python src/cli.py repos --top 5      # 最活躍 5 個 repo
-python src/cli.py lag                # pipeline lag 統計
-python src/cli.py dlq                # 檢視 Dead Letter Queue
+python src/cli.py stats --since 30   # event counts for the last 30 minutes
+python src/cli.py repos --top 5      # top 5 most active repos
+python src/cli.py lag                # pipeline lag statistics
+python src/cli.py dlq                # inspect the Dead Letter Queue
 ```
 
-**技術選擇：Click vs argparse：**
+**Why Click over argparse:**
+- Auto-generated `--help` is better formatted
+- `@click.pass_context` threads global options (`--data-dir`) through all subcommands cleanly
+- `CliRunner` makes unit testing trivial (no subprocess needed)
+- Declarative API is more readable than argparse's `add_argument` style
 
-Python 標準庫的 `argparse` 可以做到一樣的事，但 Click 的優勢是：
-- 自動生成的 `--help` 更漂亮
-- `@click.pass_context` 讓全域選項（`--data-dir`）可以穿透所有子命令
-- `CliRunner` 讓 unit test 變得極其簡單（不需要 subprocess）
-- 宣告式 API 比 argparse 的 `add_argument` 更易讀
-
-**輸出格式用 Rich：**
-
-已經是 dependency，Rich Table 輸出跟 dashboard 視覺風格一致。Event type 的顏色 mapping 跟 dashboard 相同（`PushEvent` = green、`WatchEvent` = yellow…），讓使用者切換兩個工具時不需要重新學習。
-
-**lag 顏色邏輯（跟 dashboard 完全同步）：**
-- < 30s → green（healthy）
-- 30–60s → yellow（elevated）
-- ≥ 60s → red（high）
+**Output uses Rich:**
+Already a dependency. Rich Table output matches the dashboard's visual style — same color mapping per event type so users aren't relearning the UI when switching tools.
 
 ---
 
-### 2. 擴充 processors/ — IssuesEvent、ForkEvent、CreateEvent
+### 2. Extended processors/ — IssuesEvent, ForkEvent, CreateEvent
 
-**為什麼要補：**
-
-Day 8 的 REGISTRY 只有 3 種 type，但 GitHub 公開 event stream 裡最常見的前 6 名是：
+**Why add these:**
+Day 8's REGISTRY covered only 3 types. The top 6 most frequent types in GitHub's public event stream are:
 1. `PushEvent` ✅
-2. `CreateEvent` ← 補
+2. `CreateEvent` ← added
 3. `WatchEvent` ✅
-4. `IssuesEvent` ← 補
+4. `IssuesEvent` ← added
 5. `PullRequestEvent` ✅
-6. `ForkEvent` ← 補
+6. `ForkEvent` ← added
 
-讓 `DefaultProcessor`（pass-through）處理這些 common type 雖然不會丟資料，但也拿不到任何 metrics。補齊之後，consumer log 裡每一筆 IssuesEvent 都會帶著 `action`、`issue_number`、`is_closed`、`label_count`，ForkEvent 帶著 `fork_full_name`、`fork_owner`，CreateEvent 帶著 `ref_type`、`is_semver_tag`。
+`DefaultProcessor` (pass-through) means no data is dropped for these types, but we also get no metrics. Adding typed processors means the consumer log now carries `action`, `issue_number`, `is_closed`, and `label_count` for every IssuesEvent, `fork_full_name` and `fork_owner` for ForkEvent, and `ref_type` and `is_semver_tag` for CreateEvent.
 
-**新 processor 各自的設計亮點：**
+**Design highlights per processor:**
 
-`IssuesEventProcessor`：
-- `is_closed` 判斷：action == "closed"，而不是 issue.state == "closed"（因為一個 issue 可以被 close 再 reopen，event 本身的 action 才是當下發生的動作）
-- `label_count` 追蹤：labels 變化是 issue 生命週期的重要訊號（被貼上 "critical" label 是需要注意的）
+`IssuesEventProcessor`:
+- `is_closed` uses `action == "closed"`, not `issue.state == "closed"` — because the event's `action` field reflects what just happened, not the current state
+- `label_count` tracking: label changes are a meaningful signal in an issue's lifecycle
 
-`ForkEventProcessor`：
-- Fork 是比 Star 更強的訊號：star = 表示有興趣，fork = 打算動手
-- `is_private` 追蹤：私人 fork 表示商業使用（fork 了但不公開）
+`ForkEventProcessor`:
+- A fork is a stronger signal than a star: star = interest, fork = intent to work
+- `is_private` tracking: private forks suggest commercial use
 
-`CreateEventProcessor`：
-- `ref_type` 三種：branch、tag、repository
-- `is_semver_tag`：用 regex 偵測 `v1.2.3` 格式 → release 訊號
-- 面試角度：「如果我想追蹤每個 repo 的 release 頻率，我可以 filter `CreateEvent` 且 `is_semver_tag=True`，然後按 `repo_name` group by。」
+`CreateEventProcessor`:
+- `ref_type` can be branch, tag, or repository
+- `is_semver_tag`: regex detection of `v1.2.3` format → release signal
+- Interview angle: "To track release frequency per repo, filter `CreateEvent` where `is_semver_tag=True` and group by `repo_name`."
 
-**Registry 更新：**
-
-加 import + 加進 REGISTRY dict，consumer.py 完全不用改。這正是 Strategy Pattern 的設計價值。
+Adding a processor requires only: write the class, add to `REGISTRY`. consumer.py is never modified — that's the value of the Strategy Pattern.
 
 ---
 
 ### 3. Dead Letter Queue — storage/dlq_writer.py
 
-**原本的問題：**
-
-ValidationError 在 consumer 裡的處理方式是：
-
+**The original problem:**
+`ValidationError` in the consumer was handled as:
 ```python
 except ValidationError as exc:
     log.warning("event_validation_failed", ...)
     total_skipped += 1
     continue
 ```
+The event was logged and skipped, but **the raw event was permanently gone**. If the bug was in our processor code (not the data itself), we had no way to reprocess those events.
 
-log 了、跳過了，但**原始 event 消失了**。如果 bug 其實在我們的 processor 程式碼（不是資料本身），我們永遠沒辦法重新處理那些被丟掉的 event。
-
-**DLQ 設計：**
-
+**DLQ design:**
 ```
 data/
-├── events/       ← 正常 pipeline 的 Parquet（event-time partitioned）
-└── dlq/          ← 無法處理的 event（獨立目錄，獨立 schema）
-    ├── dlq-<uuid>.parquet
+├── events/       ← normal pipeline Parquet (event-time partitioned)
+└── dlq/          ← events that failed validation (separate schema)
     ├── dlq-<uuid>.parquet
     └── ...
 ```
 
-DLQ schema（5 欄）：
+DLQ schema (5 fields):
 ```
 event_id     string
 event_type   string
 error_reason string
-raw_json     string   ← 完整的 raw event JSON，以便 replay
+raw_json     string   ← full raw event JSON for replay
 failed_at    timestamp(UTC)
 ```
 
-**Consumer 的改動：**
-
+**Consumer change:**
 ```python
 # Before: log + skip, event gone forever
 log.warning("event_validation_failed", ...)
@@ -686,141 +523,75 @@ write_dlq_entry(raw_event, reason=str(exc), dlq_dir=DLQ_DIR)
 total_dlq += 1
 ```
 
-DLQ write 本身可能失敗（磁碟滿、權限問題）。這種情況下我們 `log.error` 但不 raise——不應該讓 DLQ write 失敗拖垮整個 consumer 的主線流程。
+DLQ writes can fail (disk full, permission error). In that case we `log.error` but do not raise — a DLQ write failure should not bring down the main consumer pipeline.
 
-**`inspect_dlq()` + CLI：**
-
+**`inspect_dlq()` + CLI:**
 ```bash
 python src/cli.py dlq
 ```
 
-輸出：
+Output:
 ```
 ⚠  3 invalid events in DLQ
   Failed At         Type        Event ID     Reason
   06-28 10:05:00    PushEvent   evt-1234     payload.ref is missing
   06-28 09:58:00    WatchEvent  evt-5678     payload.action is missing
-  06-28 09:45:00    ForkEvent   evt-9012     payload.forkee is missing
 
 Tip: check data/dlq/*.parquet for the full raw_json payload
 ```
 
-DLQ 空的時候顯示 `✓ DLQ is empty — no invalid events.`
+When the DLQ is empty: `✓ DLQ is empty — no invalid events.`
 
-**為什麼用 Parquet（不用另一個 Kafka topic）：**
+**Why Parquet instead of a DLQ Kafka topic:**
+Production systems typically use a DLQ Kafka topic, but Parquet works better for this portfolio:
+- Same toolchain (DuckDB can query it directly)
+- No extra Docker container
+- One-line inspection: `python src/cli.py dlq`
 
-生產環境通常用 DLQ Kafka topic，但 Parquet 在這個 portfolio 裡的優勢是：
-- 同樣工具鏈（DuckDB 可以直接查）
-- 不需要額外 Docker container
-- 可以用 `python src/cli.py dlq` 一行查完
-
-設計意圖是一樣的：「保留問題 event 供事後審查」。
-
----
-
-**Tests：**
-- `test_cli.py`：31 個新測試，用 Click 的 `CliRunner` 在 process 內跑 CLI
-- `test_dlq.py`：19 個新測試，涵蓋 write、schema、roundtrip、edge cases
-- `test_processors.py`：擴充至涵蓋 IssuesEvent（10）、ForkEvent（7）、CreateEvent（8），Registry tests 更新
-- 全套 **155 passed**（75 舊 + 80 新）
+The design intent is the same: retain problem events for later review.
 
 ---
 
-**Day 10 後的完整檔案結構：**
-```
-src/
-├── producer.py
-├── consumer.py              ← 整合 DLQ
-├── cli.py                   ← 新增
-├── processors/
-│   ├── __init__.py          ← 更新 REGISTRY（+3 types）
-│   ├── base.py
-│   ├── push_event.py
-│   ├── watch_event.py
-│   ├── pull_request_event.py
-│   ├── issues_event.py      ← 新增
-│   ├── fork_event.py        ← 新增
-│   ├── create_event.py      ← 新增
-│   └── default.py
-├── storage/
-│   ├── schema.py
-│   ├── writer.py
-│   ├── reader.py            ← 新增 inspect_dlq()
-│   ├── compaction.py
-│   ├── dlq_writer.py        ← 新增
-│   └── queries/
-└── dashboard/
-    └── dashboard.py
-tests/
-├── test_storage.py     (43 tests)
-├── test_compaction.py  (15 tests)
-├── test_processors.py  (57 tests)  ← 擴充
-├── test_cli.py         (31 tests)  ← 新增
-└── test_dlq.py         (19 tests)  ← 新增
-```
-
-**新增 dependency：**
-- `click==8.1.7`（requirements.txt 更新）
+**Tests:**
+- `test_cli.py`: 31 new tests using Click's `CliRunner` (in-process, no subprocess)
+- `test_dlq.py`: 19 new tests covering write, schema, roundtrip, edge cases
+- `test_processors.py`: expanded to cover IssuesEvent (10), ForkEvent (7), CreateEvent (8)
+- Total: **155 passing** (75 existing + 80 new)
 
 ---
 
-_（完成）_
+## Day 11 — Parquet vs JSON-Lines Benchmark
 
----
+**Goal:** Produce real numbers to back up the claim that "columnar is faster than row-oriented."
 
-## Day 11 — Parquet vs JSON-lines Benchmark（補 Week 3 的缺口）
+**Background:**
+The project's interview pitch includes "I benchmarked query latency against row vs columnar storage." Before Day 11, that claim was unverified. Day 11 makes it true.
 
-**目標：** 把 project brief 裡還沒做的 benchmark 補齊——用真實數字證明「columnar 比 row-oriented 快多少」。
+### New files
 
-**背景：**
-Project brief 的 interview pitch 說「I benchmarked query latency against row vs columnar storage and measured a X difference」。Day 11 之前這句話是假的，因為根本沒跑過 benchmark。Day 11 把它變成真的。
+- `src/storage/jsonl_writer.py` — parallel implementation of the Parquet writer, same API: `write_batch_jsonl(events, jsonl_dir)` → `list[Path]`
+- `scripts/benchmark.py` — 7 trials × 3 scales (10k / 100k / 500k events) × 5 queries × 2 formats
+- `results/benchmark_results.json` — raw benchmark data (7 trials per query per format per scale)
+- `docs/benchmark.md` — benchmark report with charts and analysis
 
----
+**`jsonl_writer.py` design:**
+- Reuses `flatten_event()` and `_partition_key()` from `writer.py` — no copy-paste
+- Same date partitioning (`date=YYYY-MM-DD/part-*.jsonl`) for a fair comparison
+- Uses `json.dumps()` with datetime → ISO-8601 string conversion so `DuckDB read_json_auto()` can parse directly
 
-**新增 / 修改的檔案：**
+**The 5 benchmark queries:**
 
-- `src/storage/jsonl_writer.py`（新增）
-- `scripts/benchmark.py`（新增）
-- `results/benchmark_results.json`（新增，benchmark 原始數據）
-- `docs/benchmark.md`（新增，benchmark report）
-- `src/consumer.py`（bugfix：event_type keyword collision，提交至 git）
-- `src/processors/push_event.py`（bugfix：large push commits fallback，提交至 git）
+| Query | What it tests |
+|-------|---------------|
+| Q1: top repos | GROUP BY + ORDER BY LIMIT — the most common dashboard query |
+| Q2: event type distribution | Low-cardinality column scan |
+| Q3: time range filter | WHERE created_at >= ... — Parquet's strongest predicate pushdown case |
+| Q4: actor activity | Multi-column aggregation + COUNT DISTINCT |
+| Q5: push stats | JSON blob extraction — both formats must parse JSON |
 
----
+**Measured results (median latency, 100k events):**
 
-**jsonl_writer.py：**
-
-`storage/writer.py`（Parquet）有個平行的 JSON-lines 版本。
-API 完全一樣：`write_batch_jsonl(events, jsonl_dir)` → `list[Path]`。
-
-設計決定：
-- reuse `flatten_event()` 和 `_partition_key()` from `writer.py`，不 copy-paste
-- 同樣的 date 分區（`date=YYYY-MM-DD/part-*.jsonl`）確保 benchmark 公平比較
-- 用 `json.dumps()` + datetime 轉 ISO-8601 string 確保 DuckDB `read_json_auto()` 能直接解析
-
----
-
-**benchmark.py：**
-
-7 trials × 3 scales（10k / 100k / 500k events）× 5 queries × 2 formats。
-
-**5 個查詢的設計考量：**
-
-| Query | 測試什麼 |
-|-------|---------|
-| Q1: top repos | GROUP BY + ORDER BY LIMIT，最常見的 dashboard 查詢 |
-| Q2: event type dist | 低 cardinality column scan |
-| Q3: time range filter | WHERE created_at >= ...，Parquet 最強的 predicate pushdown 情境 |
-| Q4: actor activity | 多 column aggregation + COUNT DISTINCT |
-| Q5: push stats | JSON blob 內 extraction（兩種 format 都得 parse JSON） |
-
-benchmark data 寫到 `/tmp/streamlens_benchmark/`（FUSE mount 上 shutil.rmtree 有 permission 問題），results JSON 寫到 `results/benchmark_results.json`。
-
----
-
-**實際測量結果（median latency，100k events）：**
-
-| Query | Parquet (ms) | JSONL (ms) | 倍率 |
+| Query | Parquet (ms) | JSONL (ms) | Speedup |
 |-------|:---:|:---:|:---:|
 | Q1 top repos | 3.3 | 77.4 | 23× |
 | Q2 event type dist | 2.2 | 69.5 | 32× |
@@ -828,36 +599,19 @@ benchmark data 寫到 `/tmp/streamlens_benchmark/`（FUSE mount 上 shutil.rmtre
 | Q4 actor activity | 5.2 | 88.1 | 17× |
 | Q5 push stats | 12.9 | 37.2 | 3× |
 
-**為什麼 Q3 最誇張（56×）：**
+**Why Q3 is the most extreme (56×):**
+Parquet stores min/max statistics per column in each row group footer. DuckDB reads the footer and skips row groups that can't satisfy `WHERE created_at >= NOW() - INTERVAL 1 HOUR` — it never reads the data. JSON-lines must parse every row to evaluate the condition. This is predicate pushdown + columnar storage at its most powerful.
 
-Parquet 在每個 row group 的 footer 存了每個 column 的 min/max。DuckDB 看到 `WHERE created_at >= NOW() - INTERVAL 1 HOUR` 就直接跳過不符合的 row group，根本不讀資料。JSON-lines 每一行都要 parse 才能判斷。這就是 predicate pushdown + columnar storage 的核心威力。
+**Why Q5 has the smallest gap (3×):**
+Q5 extracts `.size` from the `payload_json` string column. Regardless of format, DuckDB must parse a JSON blob per row. The bottleneck shifts from I/O to CPU JSON parsing — both formats slow down, and the gap narrows.
 
-**為什麼 Q5 差距最小（3×）：**
+**Why speedup decreases slightly from 100k → 500k:**
+At 10k events, overhead dominates (connection setup, SQL parsing, I/O). At 100k, the true format difference becomes visible and speedup peaks. At 500k, both formats slow proportionally, but Parquet's per-row-group skipping becomes slightly less effective when each partition has only one large file. In a real production scenario with many small files per partition, Parquet's advantage would only increase.
 
-Q5 需要從 `payload_json` 這個 string column 裡 extract `.size`，不管 format 如何，DuckDB 都得 parse JSON blob。瓶頸從 I/O 轉移到 CPU JSON parsing，兩邊都慢，差距縮小。
+**Updated interview pitch:**
+The earlier brief said "measured a 4x difference." The actual result is **6–56×**, depending on query pattern:
+- Aggregation queries (GROUP BY): 10–30×
+- Time filter queries (predicate pushdown): 35–56×
+- JSON blob extraction queries: 2–3×
 
-**speedup 在 100k → 500k 反而縮小的原因：**
-
-在 10k events 的時候，DuckDB 幾乎全部在 overhead（建連線、parse SQL、等 I/O）。10k 到 100k，真正的 format 差異開始顯現，speedup 最大。100k 到 500k，兩種 format 都變慢，但 Parquet 的 row-group skipping 效果在更大 file size 下稍微弱化（因為每個 partition 只有一個 file，沒有 per-row-group 跳過的機會）——在真正多 file 的 production 場景，Parquet 的優勢只會更大。
-
----
-
-**面試 pitch 更新：**
-
-原版 brief 說「measured a 4x difference」。實際數字是 **6–56×**，取決於 query pattern：
-- 純 aggregation（GROUP BY）：10–30×
-- time filter（predicate pushdown）：35–56×
-- JSON blob extraction：2–3×
-
-可以說：「在 100k events 的 aggregation queries 上，Parquet 比 JSON-lines 快 17–56×。filter queries 最誇張，因為 Parquet 的 row-group statistics 讓 DuckDB 根本不需要讀大部分的資料。」
-
----
-
-**Tests：**
-- benchmark script 本身不加 unit tests（是 integration/perf script）
-- jsonl_writer.py 的邏輯 reuse writer.py 的已測函數，pattern 完全一樣
-- `results/benchmark_results.json` 有完整的 7-trial raw data 可以驗證
-
----
-
-_（完成）_
+"On 100k events, Parquet is 17–56× faster than JSON-lines for aggregation queries. The filter queries are most extreme because Parquet's row-group statistics let DuckDB skip most of the data without reading it at all."
