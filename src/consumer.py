@@ -37,6 +37,7 @@ from kafka.errors import NoBrokersAvailable
 
 from processors import get_processor, ValidationError
 from storage.writer import write_batch, StorageWriteError
+from storage.dlq_writer import write_dlq_entry, DLQWriteError
 
 load_dotenv()
 log = structlog.get_logger(__name__)
@@ -49,6 +50,7 @@ KAFKA_GROUP_ID:         str   = os.getenv("KAFKA_GROUP_ID", "streamlens-events-c
 BATCH_SIZE:             int   = int(os.getenv("BATCH_SIZE", "100"))
 FLUSH_INTERVAL_SECONDS: float = float(os.getenv("FLUSH_INTERVAL_SECONDS", "30.0"))
 DATA_DIR:               Path  = Path(os.getenv("DATA_DIR", "data/events"))
+DLQ_DIR:                Path  = Path(os.getenv("DLQ_DIR",  "data/dlq"))
 
 
 # ── Consumer setup ────────────────────────────────────────────────────────────
@@ -90,6 +92,7 @@ def run_consumer() -> None:
     last_flush_time: float      = time.monotonic()
     total_written:   int        = 0
     total_skipped:   int        = 0
+    total_dlq:       int        = 0
 
     try:
         while True:
@@ -104,16 +107,20 @@ def run_consumer() -> None:
                     try:
                         result = get_processor(event_type).process(raw_event)
                     except ValidationError as exc:
-                        # Broken event — log and skip. Do NOT add to batch.
-                        # The offset will be committed with the next successful
-                        # flush, so Kafka won't replay this broken message.
+                        # Broken event → write to DLQ so it's retained for
+                        # inspection and potential reprocessing. The offset
+                        # is committed with the next successful batch flush.
                         log.warning(
                             "event_validation_failed",
                             event_type=event_type,
                             event_id=str(raw_event.get("id", "")),
                             reason=str(exc),
                         )
-                        total_skipped += 1
+                        try:
+                            write_dlq_entry(raw_event, reason=str(exc), dlq_dir=DLQ_DIR)
+                        except DLQWriteError as dlq_exc:
+                            log.error("dlq_write_failed", error=str(dlq_exc))
+                        total_dlq += 1
                         continue
 
                     if result.skipped:
@@ -158,8 +165,16 @@ def run_consumer() -> None:
                     raise
 
     except KeyboardInterrupt:
-        log.info("consumer_stopping", total_written=total_written, total_skipped=total_skipped)
-        print(f"\n[consumer] Stopped. Written: {total_written}, Skipped: {total_skipped}")
+        log.info(
+            "consumer_stopping",
+            total_written=total_written,
+            total_skipped=total_skipped,
+            total_dlq=total_dlq,
+        )
+        print(
+            f"\n[consumer] Stopped. Written: {total_written}, "
+            f"Skipped: {total_skipped}, DLQ: {total_dlq}"
+        )
     finally:
         consumer.close()
         log.info("consumer_closed")

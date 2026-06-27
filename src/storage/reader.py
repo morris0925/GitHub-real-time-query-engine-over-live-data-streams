@@ -209,6 +209,45 @@ def get_total_event_count(data_dir: Path = DEFAULT_DATA_DIR) -> int:
     return result[0]["n"] if result else 0
 
 
+DEFAULT_DLQ_DIR = Path("data/dlq")
+
+
+def inspect_dlq(
+    limit: int = 20,
+    dlq_dir: Path = DEFAULT_DLQ_DIR,
+) -> list[dict]:
+    """
+    Return the most recent DLQ entries (events that failed validation).
+
+    Returns an empty list if the DLQ directory is empty or doesn't exist.
+
+    Example return value:
+        [
+            {
+                "event_id":     "12345678901",
+                "event_type":   "PushEvent",
+                "error_reason": "payload.ref is missing",
+                "raw_json":     "{...}",
+                "failed_at":    datetime(2026-06-28, ...),
+            },
+            ...
+        ]
+
+    Use the CLI command `python src/cli.py dlq` for a formatted view.
+    """
+    if not dlq_dir.exists() or not list(dlq_dir.glob("*.parquet")):
+        return []
+
+    glob = str(dlq_dir / "*.parquet")
+    sql = (
+        f"SELECT event_id, event_type, error_reason, raw_json, failed_at "
+        f"FROM read_parquet('{glob}') "
+        f"ORDER BY failed_at DESC "
+        f"LIMIT {limit}"
+    )
+    return _execute(sql)
+
+
 def get_avg_lag(
     since_minutes: int = 60,
     data_dir: Path = DEFAULT_DATA_DIR,

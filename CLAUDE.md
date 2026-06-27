@@ -14,33 +14,29 @@ A real-time data pipeline that polls the GitHub Events API, pushes events into K
 | Container | Docker + Docker Compose (Kafka + Zookeeper) |
 
 ## Current Project State
-The project is in active development. Current real structure:
-```
-streamlens/
-├── src/
-│   └── producer.py       # GitHub Events API → Kafka producer ✅ done
-├── data/                 # Parquet storage (date-partitioned, gitignored)
-├── docs/                 # Architecture notes, schema changelog
-├── docker-compose.yml    # Kafka + Zookeeper ✅ done
-└── README.md
-```
+Days 1–9 complete and pushed to GitHub. All layers implemented and tested (75 tests passing).
 
-Planned structure as development continues:
 ```
 streamlens/
 ├── src/
-│   ├── producer.py           # GitHub Events → Kafka
-│   ├── consumer.py           # Kafka → storage writer
-│   ├── processors/           # One file per event type (transform, validate)
+│   ├── producer.py           # GitHub Events → Kafka ✅
+│   ├── consumer.py           # Kafka → Parquet (micro-batch) ✅
+│   ├── processors/           # Per-event-type validation + enrichment ✅
 │   ├── storage/
-│   │   ├── writer.py         # PyArrow → Parquet write
-│   │   ├── reader.py         # DuckDB query functions
-│   │   ├── schema.py         # PyArrow schemas (source of truth)
-│   │   └── queries/          # .sql files for queries > 5 lines
-│   └── dashboard.py          # Rich terminal dashboard
-├── tests/
-├── data/
+│   │   ├── schema.py         # PyArrow schema (source of truth) ✅
+│   │   ├── writer.py         # Event-time partitioning + watermark ✅
+│   │   ├── reader.py         # DuckDB query functions ✅
+│   │   ├── compaction.py     # Small file merging ✅
+│   │   └── queries/          # SQL files > 5 lines ✅
+│   └── dashboard/
+│       └── dashboard.py      # Rich 4-panel terminal UI ✅
+├── tests/                    # 75 tests ✅
 ├── docs/
+│   ├── devlog.md             # Daily engineering log
+│   ├── interview_narrative.md
+│   └── schema_changelog.md
+├── .github/workflows/ci.yml  # GitHub Actions (pytest on push) ✅
+├── .env.example
 ├── docker-compose.yml
 └── requirements.txt
 ```
@@ -60,6 +56,39 @@ streamlens/
 - Every new module needs a corresponding test file in `tests/`
 - Commit messages: `feat:`, `fix:`, `refactor:`, `test:`, `docs:` prefixes
 - Never commit `.env` files
+
+## Git Workflow Rules (learned the hard way)
+
+**Commit per logical unit, not per day.**
+Each feature or layer gets its own commit with a clear message. Don't accumulate multiple days of work into one giant commit — it makes the git log useless and looks like the code was generated all at once.
+
+**Push at the end of every session.**
+`git push` after every working session. Forgetting this means the remote is stale and you may have to force-push later (which rewrites history and is risky on shared branches).
+
+**Commit message format:**
+```
+feat: short description of what was added
+
+- Bullet 1: key design decision or non-obvious detail
+- Bullet 2: what tests cover this
+```
+
+**Suggested commit cadence for this project:**
+- After each new module (schema → writer → reader → consumer → dashboard → etc.)
+- After a refactor (producer env-var refactor = its own commit)
+- After adding tests for a layer
+- After docs updates
+
+**`.git/index.lock` or `.git/HEAD.lock` errors:**
+These appear when a previous git process crashed without cleanup. Fix:
+```bash
+rm .git/index.lock   # if it exists
+rm .git/HEAD.lock    # if it exists
+```
+Then retry the git command.
+
+**Never batch-commit multiple features in one shot.**
+Even if development was done in one session, stage and commit feature by feature before pushing. The commit history is part of the portfolio — it tells the story of how the project was built.
 
 ## Docker
 - `docker-compose.yml` at root runs Kafka + Zookeeper

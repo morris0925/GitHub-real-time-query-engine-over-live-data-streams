@@ -557,4 +557,211 @@ docs/
 
 ---
 
+---
+
+---
+
+## Day 10 — CLI、擴充 Processors、Dead Letter Queue
+
+**目標：** 把 portfolio 從「能跑」升級到「好用、可觀測、可擴充」。三個功能同時推進：互動式查詢 CLI、更完整的 processor 覆蓋、以及讓破損 event 不再靜默消失的 DLQ。
+
+---
+
+### 1. src/cli.py — 互動式查詢介面
+
+**為什麼要 CLI：**
+
+Rich dashboard 適合盯著看，但有時候你只想問一個快問題——「這 10 分鐘進來了哪些 event？」或者「lag 現在多少？」——不需要啟動整個 TUI。CLI 把 DuckDB reader 包成一次性查詢，是 data engineer 日常用來 debug pipeline 的工具。
+
+**五個子命令：**
+
+```bash
+python src/cli.py events              # 最新 20 筆 event
+python src/cli.py events --type PushEvent --limit 50
+python src/cli.py stats --since 30   # 最近 30 分鐘各 type 計數
+python src/cli.py repos --top 5      # 最活躍 5 個 repo
+python src/cli.py lag                # pipeline lag 統計
+python src/cli.py dlq                # 檢視 Dead Letter Queue
+```
+
+**技術選擇：Click vs argparse：**
+
+Python 標準庫的 `argparse` 可以做到一樣的事，但 Click 的優勢是：
+- 自動生成的 `--help` 更漂亮
+- `@click.pass_context` 讓全域選項（`--data-dir`）可以穿透所有子命令
+- `CliRunner` 讓 unit test 變得極其簡單（不需要 subprocess）
+- 宣告式 API 比 argparse 的 `add_argument` 更易讀
+
+**輸出格式用 Rich：**
+
+已經是 dependency，Rich Table 輸出跟 dashboard 視覺風格一致。Event type 的顏色 mapping 跟 dashboard 相同（`PushEvent` = green、`WatchEvent` = yellow…），讓使用者切換兩個工具時不需要重新學習。
+
+**lag 顏色邏輯（跟 dashboard 完全同步）：**
+- < 30s → green（healthy）
+- 30–60s → yellow（elevated）
+- ≥ 60s → red（high）
+
+---
+
+### 2. 擴充 processors/ — IssuesEvent、ForkEvent、CreateEvent
+
+**為什麼要補：**
+
+Day 8 的 REGISTRY 只有 3 種 type，但 GitHub 公開 event stream 裡最常見的前 6 名是：
+1. `PushEvent` ✅
+2. `CreateEvent` ← 補
+3. `WatchEvent` ✅
+4. `IssuesEvent` ← 補
+5. `PullRequestEvent` ✅
+6. `ForkEvent` ← 補
+
+讓 `DefaultProcessor`（pass-through）處理這些 common type 雖然不會丟資料，但也拿不到任何 metrics。補齊之後，consumer log 裡每一筆 IssuesEvent 都會帶著 `action`、`issue_number`、`is_closed`、`label_count`，ForkEvent 帶著 `fork_full_name`、`fork_owner`，CreateEvent 帶著 `ref_type`、`is_semver_tag`。
+
+**新 processor 各自的設計亮點：**
+
+`IssuesEventProcessor`：
+- `is_closed` 判斷：action == "closed"，而不是 issue.state == "closed"（因為一個 issue 可以被 close 再 reopen，event 本身的 action 才是當下發生的動作）
+- `label_count` 追蹤：labels 變化是 issue 生命週期的重要訊號（被貼上 "critical" label 是需要注意的）
+
+`ForkEventProcessor`：
+- Fork 是比 Star 更強的訊號：star = 表示有興趣，fork = 打算動手
+- `is_private` 追蹤：私人 fork 表示商業使用（fork 了但不公開）
+
+`CreateEventProcessor`：
+- `ref_type` 三種：branch、tag、repository
+- `is_semver_tag`：用 regex 偵測 `v1.2.3` 格式 → release 訊號
+- 面試角度：「如果我想追蹤每個 repo 的 release 頻率，我可以 filter `CreateEvent` 且 `is_semver_tag=True`，然後按 `repo_name` group by。」
+
+**Registry 更新：**
+
+加 import + 加進 REGISTRY dict，consumer.py 完全不用改。這正是 Strategy Pattern 的設計價值。
+
+---
+
+### 3. Dead Letter Queue — storage/dlq_writer.py
+
+**原本的問題：**
+
+ValidationError 在 consumer 裡的處理方式是：
+
+```python
+except ValidationError as exc:
+    log.warning("event_validation_failed", ...)
+    total_skipped += 1
+    continue
+```
+
+log 了、跳過了，但**原始 event 消失了**。如果 bug 其實在我們的 processor 程式碼（不是資料本身），我們永遠沒辦法重新處理那些被丟掉的 event。
+
+**DLQ 設計：**
+
+```
+data/
+├── events/       ← 正常 pipeline 的 Parquet（event-time partitioned）
+└── dlq/          ← 無法處理的 event（獨立目錄，獨立 schema）
+    ├── dlq-<uuid>.parquet
+    ├── dlq-<uuid>.parquet
+    └── ...
+```
+
+DLQ schema（5 欄）：
+```
+event_id     string
+event_type   string
+error_reason string
+raw_json     string   ← 完整的 raw event JSON，以便 replay
+failed_at    timestamp(UTC)
+```
+
+**Consumer 的改動：**
+
+```python
+# Before: log + skip, event gone forever
+log.warning("event_validation_failed", ...)
+total_skipped += 1
+
+# After: log + write to DLQ, event retained
+log.warning("event_validation_failed", ...)
+write_dlq_entry(raw_event, reason=str(exc), dlq_dir=DLQ_DIR)
+total_dlq += 1
+```
+
+DLQ write 本身可能失敗（磁碟滿、權限問題）。這種情況下我們 `log.error` 但不 raise——不應該讓 DLQ write 失敗拖垮整個 consumer 的主線流程。
+
+**`inspect_dlq()` + CLI：**
+
+```bash
+python src/cli.py dlq
+```
+
+輸出：
+```
+⚠  3 invalid events in DLQ
+  Failed At         Type        Event ID     Reason
+  06-28 10:05:00    PushEvent   evt-1234     payload.ref is missing
+  06-28 09:58:00    WatchEvent  evt-5678     payload.action is missing
+  06-28 09:45:00    ForkEvent   evt-9012     payload.forkee is missing
+
+Tip: check data/dlq/*.parquet for the full raw_json payload
+```
+
+DLQ 空的時候顯示 `✓ DLQ is empty — no invalid events.`
+
+**為什麼用 Parquet（不用另一個 Kafka topic）：**
+
+生產環境通常用 DLQ Kafka topic，但 Parquet 在這個 portfolio 裡的優勢是：
+- 同樣工具鏈（DuckDB 可以直接查）
+- 不需要額外 Docker container
+- 可以用 `python src/cli.py dlq` 一行查完
+
+設計意圖是一樣的：「保留問題 event 供事後審查」。
+
+---
+
+**Tests：**
+- `test_cli.py`：31 個新測試，用 Click 的 `CliRunner` 在 process 內跑 CLI
+- `test_dlq.py`：19 個新測試，涵蓋 write、schema、roundtrip、edge cases
+- `test_processors.py`：擴充至涵蓋 IssuesEvent（10）、ForkEvent（7）、CreateEvent（8），Registry tests 更新
+- 全套 **155 passed**（75 舊 + 80 新）
+
+---
+
+**Day 10 後的完整檔案結構：**
+```
+src/
+├── producer.py
+├── consumer.py              ← 整合 DLQ
+├── cli.py                   ← 新增
+├── processors/
+│   ├── __init__.py          ← 更新 REGISTRY（+3 types）
+│   ├── base.py
+│   ├── push_event.py
+│   ├── watch_event.py
+│   ├── pull_request_event.py
+│   ├── issues_event.py      ← 新增
+│   ├── fork_event.py        ← 新增
+│   ├── create_event.py      ← 新增
+│   └── default.py
+├── storage/
+│   ├── schema.py
+│   ├── writer.py
+│   ├── reader.py            ← 新增 inspect_dlq()
+│   ├── compaction.py
+│   ├── dlq_writer.py        ← 新增
+│   └── queries/
+└── dashboard/
+    └── dashboard.py
+tests/
+├── test_storage.py     (43 tests)
+├── test_compaction.py  (15 tests)
+├── test_processors.py  (57 tests)  ← 擴充
+├── test_cli.py         (31 tests)  ← 新增
+└── test_dlq.py         (19 tests)  ← 新增
+```
+
+**新增 dependency：**
+- `click==8.1.7`（requirements.txt 更新）
+
+---
+
 _（完成）_

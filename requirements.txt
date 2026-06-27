@@ -16,5 +16,8 @@ rich==13.7.1
 # Logging
 structlog==24.1.0
 
+# CLI
+click==8.1.7
+
 # Testing
 pytest==8.1.1

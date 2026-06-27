@@ -32,16 +32,26 @@ from processors.base import EventProcessor, ProcessorResult, ValidationError
 from processors.push_event import PushEventProcessor
 from processors.watch_event import WatchEventProcessor
 from processors.pull_request_event import PullRequestEventProcessor
+from processors.issues_event import IssuesEventProcessor
+from processors.fork_event import ForkEventProcessor
+from processors.create_event import CreateEventProcessor
 from processors.default import DefaultProcessor
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 # Maps GitHub event type strings → processor classes.
 # DefaultProcessor is the fallback for any type not listed here.
+#
+# Coverage after Day 10:
+#   PushEvent, WatchEvent, PullRequestEvent  ← Day 8
+#   IssuesEvent, ForkEvent, CreateEvent      ← Day 10
 
 REGISTRY: dict[str, type[EventProcessor]] = {
     "PushEvent":          PushEventProcessor,
     "WatchEvent":         WatchEventProcessor,
     "PullRequestEvent":   PullRequestEventProcessor,
+    "IssuesEvent":        IssuesEventProcessor,
+    "ForkEvent":          ForkEventProcessor,
+    "CreateEvent":        CreateEventProcessor,
 }
 
 # Singleton instances — we only need one per type, no state between calls

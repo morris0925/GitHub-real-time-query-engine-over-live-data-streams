@@ -20,6 +20,9 @@ from processors.base import EventProcessor
 from processors.push_event import PushEventProcessor
 from processors.watch_event import WatchEventProcessor
 from processors.pull_request_event import PullRequestEventProcessor
+from processors.issues_event import IssuesEventProcessor
+from processors.fork_event import ForkEventProcessor
+from processors.create_event import CreateEventProcessor
 from processors.default import DefaultProcessor
 
 
@@ -92,9 +95,18 @@ class TestRegistry:
     def test_get_processor_returns_pr_processor(self):
         assert isinstance(get_processor("PullRequestEvent"), PullRequestEventProcessor)
 
+    def test_get_processor_returns_issues_processor(self):
+        assert isinstance(get_processor("IssuesEvent"), IssuesEventProcessor)
+
+    def test_get_processor_returns_fork_processor(self):
+        assert isinstance(get_processor("ForkEvent"), ForkEventProcessor)
+
+    def test_get_processor_returns_create_processor(self):
+        assert isinstance(get_processor("CreateEvent"), CreateEventProcessor)
+
     def test_get_processor_falls_back_to_default(self):
-        """Unknown event types should get the DefaultProcessor, not raise."""
-        proc = get_processor("ForkEvent")
+        """Truly unknown event types (not in REGISTRY) → DefaultProcessor."""
+        proc = get_processor("GollumEvent")
         assert isinstance(proc, DefaultProcessor)
 
     def test_get_processor_is_cached(self):
@@ -102,7 +114,8 @@ class TestRegistry:
         assert get_processor("PushEvent") is get_processor("PushEvent")
 
     def test_registry_contains_known_types(self):
-        for t in ("PushEvent", "WatchEvent", "PullRequestEvent"):
+        for t in ("PushEvent", "WatchEvent", "PullRequestEvent",
+                  "IssuesEvent", "ForkEvent", "CreateEvent"):
             assert t in REGISTRY
 
 
@@ -228,27 +241,205 @@ class TestPullRequestEventProcessor:
         assert "number" in str(exc_info.value)
 
 
-# ── 5. DefaultProcessor ───────────────────────────────────────────────────────
+# ── 5. IssuesEventProcessor ───────────────────────────────────────────────────
 
-class TestDefaultProcessor:
-    def test_unknown_type_does_not_raise(self):
-        event = base_event("ForkEvent")
-        result = get_processor("ForkEvent").process(event)
+def issues_event(action: str = "opened", issue_number: int = 42, **overrides) -> dict:
+    event = base_event("IssuesEvent")
+    event["payload"] = {
+        "action": action,
+        "issue": {
+            "number":   issue_number,
+            "title":    "Bug: segfault",
+            "state":    "open",
+            "comments": 3,
+            "labels":   [{"name": "bug"}, {"name": "urgent"}],
+        },
+        **overrides,
+    }
+    return event
+
+
+class TestIssuesEventProcessor:
+    def test_valid_event_returns_result(self):
+        result = get_processor("IssuesEvent").process(issues_event())
         assert isinstance(result, ProcessorResult)
         assert not result.skipped
 
-    def test_create_event_passes_through(self):
-        event = base_event("CreateEvent")
-        event["payload"] = {"ref_type": "branch", "ref": "feature/x"}
+    def test_metrics_action(self):
+        result = get_processor("IssuesEvent").process(issues_event("opened"))
+        assert result.metrics["action"] == "opened"
+
+    def test_metrics_issue_number(self):
+        result = get_processor("IssuesEvent").process(issues_event(issue_number=99))
+        assert result.metrics["issue_number"] == 99
+
+    def test_metrics_is_closed_true(self):
+        result = get_processor("IssuesEvent").process(issues_event("closed"))
+        assert result.metrics["is_closed"] is True
+
+    def test_metrics_is_closed_false_for_opened(self):
+        result = get_processor("IssuesEvent").process(issues_event("opened"))
+        assert result.metrics["is_closed"] is False
+
+    def test_metrics_label_count(self):
+        result = get_processor("IssuesEvent").process(issues_event())
+        assert result.metrics["label_count"] == 2
+
+    def test_metrics_comment_count(self):
+        result = get_processor("IssuesEvent").process(issues_event())
+        assert result.metrics["comment_count"] == 3
+
+    def test_missing_action_raises(self):
+        event = issues_event()
+        del event["payload"]["action"]
+        with pytest.raises(ValidationError) as exc_info:
+            get_processor("IssuesEvent").process(event)
+        assert "action" in str(exc_info.value)
+
+    def test_missing_issue_number_raises(self):
+        event = issues_event()
+        del event["payload"]["issue"]["number"]
+        with pytest.raises(ValidationError) as exc_info:
+            get_processor("IssuesEvent").process(event)
+        assert "number" in str(exc_info.value)
+
+    def test_empty_labels_is_valid(self):
+        event = issues_event()
+        event["payload"]["issue"]["labels"] = []
+        result = get_processor("IssuesEvent").process(event)
+        assert result.metrics["label_count"] == 0
+
+
+# ── 6. ForkEventProcessor ─────────────────────────────────────────────────────
+
+def fork_event(**forkee_overrides) -> dict:
+    event = base_event("ForkEvent")
+    event["payload"] = {
+        "forkee": {
+            "id":        987654,
+            "name":      "myrepo",
+            "full_name": "bob/myrepo",
+            "owner":     {"login": "bob"},
+            "private":   False,
+            "fork":      True,
+            **forkee_overrides,
+        }
+    }
+    return event
+
+
+class TestForkEventProcessor:
+    def test_valid_event_returns_result(self):
+        result = get_processor("ForkEvent").process(fork_event())
+        assert isinstance(result, ProcessorResult)
+        assert not result.skipped
+
+    def test_metrics_fork_full_name(self):
+        result = get_processor("ForkEvent").process(fork_event())
+        assert result.metrics["fork_full_name"] == "bob/myrepo"
+
+    def test_metrics_fork_owner(self):
+        result = get_processor("ForkEvent").process(fork_event())
+        assert result.metrics["fork_owner"] == "bob"
+
+    def test_metrics_is_private_false(self):
+        result = get_processor("ForkEvent").process(fork_event())
+        assert result.metrics["is_private"] is False
+
+    def test_metrics_is_private_true(self):
+        result = get_processor("ForkEvent").process(fork_event(private=True))
+        assert result.metrics["is_private"] is True
+
+    def test_missing_forkee_raises(self):
+        event = fork_event()
+        del event["payload"]["forkee"]
+        with pytest.raises(ValidationError) as exc_info:
+            get_processor("ForkEvent").process(event)
+        assert "forkee" in str(exc_info.value)
+
+    def test_missing_forkee_full_name_raises(self):
+        event = fork_event()
+        del event["payload"]["forkee"]["full_name"]
+        with pytest.raises(ValidationError) as exc_info:
+            get_processor("ForkEvent").process(event)
+        assert "full_name" in str(exc_info.value)
+
+
+# ── 7. CreateEventProcessor ───────────────────────────────────────────────────
+
+def create_event(ref_type: str = "branch", ref: str = "feature/x") -> dict:
+    event = base_event("CreateEvent")
+    event["payload"] = {
+        "ref_type":      ref_type,
+        "ref":           ref,
+        "master_branch": "main",
+    }
+    return event
+
+
+class TestCreateEventProcessor:
+    def test_valid_branch_event(self):
+        result = get_processor("CreateEvent").process(create_event("branch", "feature/x"))
+        assert isinstance(result, ProcessorResult)
+        assert result.metrics["ref_type"] == "branch"
+        assert result.metrics["is_tag"] is False
+
+    def test_valid_tag_event(self):
+        result = get_processor("CreateEvent").process(create_event("tag", "v1.2.3"))
+        assert result.metrics["is_tag"] is True
+
+    def test_semver_tag_detected(self):
+        result = get_processor("CreateEvent").process(create_event("tag", "v1.2.3"))
+        assert result.metrics["is_semver_tag"] is True
+
+    def test_non_semver_tag_not_flagged(self):
+        result = get_processor("CreateEvent").process(create_event("tag", "hotfix-login"))
+        assert result.metrics["is_semver_tag"] is False
+
+    def test_semver_without_v_prefix(self):
+        result = get_processor("CreateEvent").process(create_event("tag", "2.0.0"))
+        assert result.metrics["is_semver_tag"] is True
+
+    def test_repository_ref_type_is_valid(self):
+        event = create_event("repository", "")
         result = get_processor("CreateEvent").process(event)
+        assert result.metrics["ref_type"] == "repository"
+
+    def test_invalid_ref_type_raises(self):
+        event = create_event("unknown_type", "foo")
+        with pytest.raises(ValidationError) as exc_info:
+            get_processor("CreateEvent").process(event)
+        assert "ref_type" in str(exc_info.value)
+
+    def test_missing_ref_type_raises(self):
+        event = base_event("CreateEvent")
+        event["payload"] = {}   # no ref_type at all
+        with pytest.raises(ValidationError):
+            get_processor("CreateEvent").process(event)
+
+
+# ── 8. DefaultProcessor ───────────────────────────────────────────────────────
+
+class TestDefaultProcessor:
+    def test_truly_unknown_type_does_not_raise(self):
+        """GollumEvent (wiki edit) is not in REGISTRY → DefaultProcessor."""
+        event = base_event("GollumEvent")
+        result = get_processor("GollumEvent").process(event)
+        assert isinstance(result, ProcessorResult)
+        assert not result.skipped
+
+    def test_unknown_event_passes_through_unchanged(self):
+        event = base_event("MemberEvent")
+        event["payload"] = {"action": "added"}
+        result = get_processor("MemberEvent").process(event)
         assert result.event is event   # same dict, untouched
 
     def test_missing_id_raises_even_for_default(self):
         """Even the default processor requires 'id'."""
-        event = base_event("ForkEvent")
+        event = base_event("GollumEvent")
         del event["id"]
         with pytest.raises(ValidationError):
-            get_processor("ForkEvent").process(event)
+            get_processor("GollumEvent").process(event)
 
 
 # ── 6. ValidationError structure ─────────────────────────────────────────────
