@@ -1,0 +1,20 @@
+# StreamLens dependencies
+# Install with: pip install -r requirements.txt
+
+# Pipeline
+kafka-python==2.0.2
+requests==2.31.0
+python-dotenv==1.0.1
+
+# Storage
+pyarrow==15.0.2
+duckdb==0.10.3
+
+# Dashboard
+rich==13.7.1
+
+# Logging
+structlog==24.1.0
+
+# Testing
+pytest==8.1.1
