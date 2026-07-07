@@ -11,10 +11,13 @@ A real-time data pipeline that polls the GitHub Events API, pushes events into K
 | Storage | PyArrow → Parquet files |
 | Query engine | DuckDB (reads Parquet directly, no separate DB server) |
 | Terminal dashboard | Rich (Python) |
+| AI diagnostic API | FastAPI + DuckDB VSS + Claude Haiku (see docs/ai-interface-design-proposal.md) |
+| AI dashboard | Next.js (`frontend/`, separate from the Python core) |
 | Container | Docker + Docker Compose (Kafka + Zookeeper) |
 
 ## Current Project State
-Days 1–11 complete and pushed to GitHub. All layers implemented and tested (155 tests passing).
+Days 1–11 complete and pushed to GitHub. All pipeline layers implemented and tested (155 tests passing).
+In progress: AI diagnostic layer (docs/ai-interface-design-proposal.md §6 MVP) — `src/knowledge/`, `src/anomaly/`, `src/api/`, `frontend/`.
 
 ```
 streamlens/
@@ -112,7 +115,7 @@ Even if development was done in one session, stage and commit feature by feature
 - `docker-compose.yml` at root runs Kafka + Zookeeper
 - Use named volumes for data persistence
 - Health checks required on kafka container
-- No web server container — this is a terminal-only project
+- No web server container in docker-compose — the FastAPI service and Next.js dev server run directly on the host for the demo
 
 ## What NOT to Do
 - Don't use pandas (use PyArrow/DuckDB instead)
@@ -120,4 +123,6 @@ Even if development was done in one session, stage and commit feature by feature
 - Don't write raw SQL strings longer than 5 lines inline — extract to `src/storage/queries/`
 - Don't add new Python dependencies without updating `requirements.txt`
 - Don't mix concerns: pipeline logic, storage logic, and dashboard logic stay in separate files
-- Don't build a web frontend — the dashboard is a Rich terminal app
+- Don't build web UI for the core pipeline — the pipeline dashboard is a Rich terminal app. The AI diagnostic layer is the one exception: it ships a Next.js frontend (`frontend/`) talking to `src/api/` over HTTP, per docs/ai-interface-design-proposal.md. Never mix the two: the Rich dashboard stays untouched.
+- Don't let the Next.js app reimplement data logic — it only calls the FastAPI service
+- AI-generated content must follow the trust rules in docs/ai-interface-design-proposal.md §4 (violet accent, per-block labels, qualitative confidence bands, hedged prompt language)
