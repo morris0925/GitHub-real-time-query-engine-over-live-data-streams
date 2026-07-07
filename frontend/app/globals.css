@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+/*
+ * Three visual channels that must never look alike (design proposal §4):
+ *  - severity:   red / orange / yellow  (badge fills)
+ *  - AI content: violet, exclusively    (--ai-accent)
+ *  - signal bar: teal chrome            (--signal-accent)
+ */
+:root {
+  --ai-accent: #8b5cf6;        /* violet-500 — LLM-generated content only */
+  --signal-accent: #14b8a6;    /* teal-500 — Dev Pipeline Signal bar only */
+}
+
+body {
+  @apply bg-slate-950 text-slate-200 antialiased;
+}
