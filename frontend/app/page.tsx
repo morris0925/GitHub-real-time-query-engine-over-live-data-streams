@@ -3,19 +3,22 @@
 /**
  * Single-page AI diagnostics dashboard (design proposal §6 MVP):
  * Signal bar on top, incident feed left (polls /anomalies), diagnosis
- * detail right (/diagnose/:id), page-level AI disclaimer as footer backstop.
+ * detail right (/diagnose/:id or /query answers), active-query box below,
+ * demo-anomaly trigger for live demos, footer disclaimer as §4 backstop.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import {
   Anomaly,
-  Diagnosis,
   fetchAnomalies,
   fetchDiagnosis,
+  postQuery,
+  triggerDemoAnomaly,
 } from "@/lib/api";
 import SignalBar from "@/components/SignalBar";
 import IncidentFeed from "@/components/IncidentFeed";
-import DiagnosisPanel from "@/components/DiagnosisPanel";
+import DiagnosisPanel, { PanelResult } from "@/components/DiagnosisPanel";
+import QueryBox from "@/components/QueryBox";
 
 const FEED_POLL_MS = 7000; // §1: 5-10s polling is indistinguishable from push in a demo
 
@@ -27,70 +30,92 @@ export default function Home() {
   const [anomalies, setAnomalies] = useState<Anomaly[]>([]);
   const [feedError, setFeedError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [diagnosis, setDiagnosis] = useState<Diagnosis | null>(null);
-  const [diagnosisLoading, setDiagnosisLoading] = useState(false);
-  const [diagnosisError, setDiagnosisError] = useState<string | null>(null);
+  const [result, setResult] = useState<PanelResult | null>(null);
+  const [panelLoading, setPanelLoading] = useState(false);
+  const [panelError, setPanelError] = useState<string | null>(null);
+  const [seeding, setSeeding] = useState(false);
 
-  useEffect(() => {
-    let active = true;
-    const load = () =>
-      fetchAnomalies()
-        .then((list) => {
-          if (!active) return;
-          setAnomalies(list);
-          setFeedError(null);
-        })
-        .catch((err: Error) => active && setFeedError(err.message));
-    load();
-    const timer = setInterval(load, FEED_POLL_MS);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, []);
-
-  const selectAnomaly = useCallback((anomalyId: string) => {
-    setSelectedId(anomalyId);
-    setDiagnosis(null);
-    setDiagnosisError(null);
-    setDiagnosisLoading(true);
-    fetchDiagnosis(anomalyId)
-      .then((d) => {
-        setDiagnosis(d);
-        setDiagnosisLoading(false);
+  const refreshFeed = useCallback(() => {
+    return fetchAnomalies()
+      .then((list) => {
+        setAnomalies(list);
+        setFeedError(null);
+        return list;
       })
       .catch((err: Error) => {
-        setDiagnosisError(`Diagnosis failed: ${err.message}`);
-        setDiagnosisLoading(false);
+        setFeedError(err.message);
+        return [] as Anomaly[];
       });
   }, []);
 
+  useEffect(() => {
+    refreshFeed();
+    const timer = setInterval(refreshFeed, FEED_POLL_MS);
+    return () => clearInterval(timer);
+  }, [refreshFeed]);
+
+  const selectAnomaly = useCallback((anomalyId: string) => {
+    setSelectedId(anomalyId);
+    setResult(null);
+    setPanelError(null);
+    setPanelLoading(true);
+    fetchDiagnosis(anomalyId)
+      .then((d) => setResult(d))
+      .catch((err: Error) => setPanelError(`Diagnosis failed: ${err.message}`))
+      .finally(() => setPanelLoading(false));
+  }, []);
+
+  const askQuestion = useCallback((question: string) => {
+    setSelectedId(null);
+    setResult(null);
+    setPanelError(null);
+    setPanelLoading(true);
+    postQuery(question)
+      .then((answer) => setResult(answer))
+      .catch((err: Error) => setPanelError(`Query failed: ${err.message}`))
+      .finally(() => setPanelLoading(false));
+  }, []);
+
+  const seedDemo = useCallback(() => {
+    setSeeding(true);
+    triggerDemoAnomaly()
+      .then(async (anomaly) => {
+        await refreshFeed();
+        selectAnomaly(anomaly.anomaly_id);
+      })
+      .catch((err: Error) => setFeedError(err.message))
+      .finally(() => setSeeding(false));
+  }, [refreshFeed, selectAnomaly]);
+
   return (
     <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-4 p-4">
-      <header className="flex items-baseline justify-between">
+      <header className="flex items-center justify-between">
         <h1 className="text-lg font-semibold text-slate-100">
           StreamLens <span className="text-slate-400">/ AI Diagnostics</span>
         </h1>
-        <span className="text-xs text-slate-500">
-          GitHub events · Kafka · Parquet · DuckDB
-        </span>
+        <button
+          onClick={seedDemo}
+          disabled={seeding}
+          className="rounded-md border border-slate-600 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:border-slate-500 disabled:opacity-40"
+          title="Seed a synthetic anomaly — live GitHub events may not produce one on cue"
+        >
+          {seeding ? "Seeding…" : "Trigger demo anomaly"}
+        </button>
       </header>
 
       <SignalBar />
 
-      <div className="grid flex-1 grid-cols-[minmax(260px,1fr)_2fr] gap-4">
+      <div className="grid min-h-[420px] flex-1 grid-cols-[minmax(260px,1fr)_2fr] gap-4">
         <IncidentFeed
           anomalies={anomalies}
           selectedId={selectedId}
           onSelect={selectAnomaly}
           error={feedError}
         />
-        <DiagnosisPanel
-          diagnosis={diagnosis}
-          loading={diagnosisLoading}
-          error={diagnosisError}
-        />
+        <DiagnosisPanel result={result} loading={panelLoading} error={panelError} />
       </div>
+
+      <QueryBox onSubmit={askQuestion} busy={panelLoading} />
 
       <footer className="border-t border-slate-800 pt-3 text-center text-[11px] text-slate-500">
         {PAGE_DISCLAIMER}

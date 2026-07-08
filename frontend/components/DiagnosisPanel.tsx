@@ -13,8 +13,15 @@
  *   7. Raw retrieved evidence           (collapsed by default)
  */
 
-import { Diagnosis, OutcomeEstimate, SimilarCase } from "@/lib/api";
+import { Diagnosis, OutcomeEstimate, QueryResponse, SimilarCase } from "@/lib/api";
 import { AiBlock, BandBadge, SeverityBadge } from "@/components/badges";
+
+/** The panel renders either an anomaly diagnosis or a free-text query answer. */
+export type PanelResult = Diagnosis | QueryResponse;
+
+function isDiagnosis(result: PanelResult): result is Diagnosis {
+  return "anomaly" in result;
+}
 
 const TYPE_LABELS: Record<string, string> = {
   ci_failure_spike: "CI failure spike",
@@ -167,14 +174,15 @@ function SimilarCases({ cases, notice }: { cases: SimilarCase[]; notice: string 
 }
 
 export default function DiagnosisPanel({
-  diagnosis,
+  result,
   loading,
   error,
 }: {
-  diagnosis: Diagnosis | null;
+  result: PanelResult | null;
   loading: boolean;
   error: string | null;
 }) {
+  const diagnosis = result;
   return (
     <section
       aria-label="Diagnosis detail"
@@ -192,18 +200,31 @@ export default function DiagnosisPanel({
       {diagnosis && (
         <div className="space-y-3">
           {/* 1 — header row */}
-          <header className="flex flex-wrap items-center gap-2">
-            <SeverityBadge severity={diagnosis.anomaly.severity} />
-            <h2 className="text-base font-semibold text-slate-100">
-              {diagnosis.anomaly.title}
-            </h2>
-            <span className="ml-auto text-[11px] text-slate-500">
-              {TYPE_LABELS[diagnosis.anomaly.type] ?? diagnosis.anomaly.type} ·{" "}
-              {new Date(diagnosis.anomaly.detected_at).toLocaleString()}
-            </span>
-          </header>
-          {diagnosis.anomaly.description && (
-            <p className="text-sm text-slate-400">{diagnosis.anomaly.description}</p>
+          {isDiagnosis(diagnosis) ? (
+            <>
+              <header className="flex flex-wrap items-center gap-2">
+                <SeverityBadge severity={diagnosis.anomaly.severity} />
+                <h2 className="text-base font-semibold text-slate-100">
+                  {diagnosis.anomaly.title}
+                </h2>
+                <span className="ml-auto text-[11px] text-slate-500">
+                  {TYPE_LABELS[diagnosis.anomaly.type] ?? diagnosis.anomaly.type} ·{" "}
+                  {new Date(diagnosis.anomaly.detected_at).toLocaleString()}
+                </span>
+              </header>
+              {diagnosis.anomaly.description && (
+                <p className="text-sm text-slate-400">{diagnosis.anomaly.description}</p>
+              )}
+            </>
+          ) : (
+            <header className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                Question
+              </span>
+              <h2 className="text-base font-semibold text-slate-100">
+                {diagnosis.question}
+              </h2>
+            </header>
           )}
 
           {/* 2 — AI trust banner, before any generated text */}
