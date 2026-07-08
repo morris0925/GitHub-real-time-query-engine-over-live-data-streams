@@ -615,3 +615,31 @@ The earlier brief said "measured a 4x difference." The actual result is **6–56
 - JSON blob extraction queries: 2–3×
 
 "On 100k events, Parquet is 17–56× faster than JSON-lines for aggregation queries. The filter queries are most extreme because Parquet's row-group statistics let DuckDB skip most of the data without reading it at all."
+
+---
+
+## Day 12 — AI Diagnostic Layer MVP (FastAPI + RAG + Next.js)
+
+**Goal:** Build the §6 "1-week minimal demo" scope from docs/ai-interface-design-proposal.md: a FastAPI diagnostic service (RAG over closed issues/PRs + Claude Haiku) and a Next.js dashboard, as a peer layer that leaves the core pipeline and Rich terminal dashboard untouched.
+
+**What was done:**
+- `src/knowledge/` — knowledge base: GitHub REST ingestion of closed issues/PRs into `kb.parquet`, storing labels, time-to-resolve, and revert linkage (a later PR titled "Revert ..." pointing back at the original), not just embeddable text; Voyage AI embeddings (deterministic hash-stub fallback when no key); DuckDB retriever with best-effort VSS HNSW index and brute-force `array_cosine_similarity` fallback
+- `src/knowledge/outcomes.py` — Tier 2 historical-outcome estimate: revert rate, avg time-to-resolve, severity-label rollup. Pure DuckDB aggregation, no LLM — the factual counterweight rendered beside the generated summary
+- `src/anomaly/` — Tier 1 rule-based detection (CI failure spike / merge-time anomaly / commit drought), each a recent-window vs baseline comparison with min-sample guards; CI signal fetched from the GitHub Actions API since the public Events feed has no CI events; anomaly Parquet store with deterministic per-(type, hour) IDs; demo seeder for live demos
+- `src/api/` — FastAPI: `GET /anomalies`, `GET /signal`, `GET /diagnose/{id}` (cached), `POST /query`, `POST /demo/anomaly`, `GET /health`
+- `frontend/` — Next.js 15 single page: Dev Pipeline Signal bar (three components side by side, honest caption), incident feed polling every 7s, diagnosis panel in the exact §2 order, active-query box, demo trigger
+
+**Trust labeling (§4), enforced at every layer:**
+- Hedged language required in the Haiku system prompt itself ("likely related to…", causal claims forbidden) — the highest-leverage control, since the generated text must not overclaim regardless of UI
+- Violet reserved exclusively for AI content; severity keeps red/orange/yellow; signal bar gets teal
+- Sparkle + "AI-generated · verify before acting" on every generated block individually, plus a page-footer disclaimer backstop
+- Confidence and similarity as qualitative bands (high/medium/low), never percentages
+- Keyless/stub runs are labeled as placeholders in the UI and reported honestly in response meta
+
+**What was learned:**
+- The public GitHub Events feed contains no CI/status events — "CI failure rate" needs the Actions API (or webhooks) as a separate source. Worth stating in interviews: know what your data source can't tell you
+- GitHub's revert button auto-inserts "Reverts owner/repo#N" into PR bodies, which makes revert-linkage mining a two-pass join over data we already fetch — Tier 2 impact estimates cost zero extra API calls
+- DuckDB ≥1.0 has `array_cosine_similarity` in core; the VSS extension only adds the HNSW index. For a few hundred KB cases, brute force is plenty — the index is an optimization, not a dependency
+- Degrade loudly, not silently: hash-stub embeddings and the stub LLM keep the demo running without keys, but every response carries the provider name so nothing fake can pass as real
+
+**Not built (explicitly out of scope):** CLI changes, Slack/Teams push, auth, persisted feedback, metric chart in the panel, Tier 3 production telemetry, evaluation framework.
