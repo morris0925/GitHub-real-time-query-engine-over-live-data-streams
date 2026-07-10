@@ -122,12 +122,18 @@ def _evidence_blocks(cases: list[dict]) -> list[str]:
     return blocks
 
 
-def _build_user_prompt(subject: str, evidence: list[str]) -> str:
+def _build_user_prompt(
+    subject: str, evidence: list[str], live_context: str | None = None
+) -> str:
     evidence_text = "\n\n---\n\n".join(evidence) if evidence else "(no similar cases retrieved)"
-    return (
-        f"## Subject\n{subject}\n\n"
-        f"## Retrieved similar historical cases\n{evidence_text}"
-    )
+    sections = [f"## Subject\n{subject}"]
+    if live_context:
+        sections.append(
+            "## Live pipeline evidence (computed from current stream/CI data — "
+            f"cite specific workflows and PR numbers from here)\n{live_context}"
+        )
+    sections.append(f"## Retrieved similar historical cases\n{evidence_text}")
+    return "\n\n".join(sections)
 
 
 def _parse_llm_json(raw: str) -> dict:
@@ -174,9 +180,14 @@ def diagnose(
     retriever: Retriever,
     llm: LLMClient,
     kb_dir: Path = KB_DIR,
+    live_context: str | None = None,
 ) -> dict:
     """
     Full RAG + LLM + Tier 2 pass for a subject (anomaly text or question).
+
+    live_context is the formatted pipeline snapshot (anomaly/evidence.py):
+    it goes into the prompt so the model can cite real workflows/PRs, and
+    into raw_evidence so the engineer audits the exact same facts.
 
     Returns the shared body of Diagnosis/QueryResponse:
     generated, outcome_estimate, similar_cases, raw_evidence, meta.
@@ -184,8 +195,13 @@ def diagnose(
     cases = retriever.search(subject, top_k=TOP_K)
     outcome = estimate_outcomes([case["case_id"] for case in cases], kb_dir=kb_dir)
     evidence = _evidence_blocks(cases)
+    if live_context:
+        evidence = [f"[live pipeline snapshot]\n{live_context}", *evidence]
 
-    raw = llm.complete(DIAGNOSIS_SYSTEM_PROMPT, _build_user_prompt(subject, evidence))
+    raw = llm.complete(
+        DIAGNOSIS_SYSTEM_PROMPT,
+        _build_user_prompt(subject, _evidence_blocks(cases), live_context),
+    )
     generated = _parse_llm_json(raw)
 
     log.info(

@@ -148,7 +148,9 @@ def test_merge_time_anomaly_detected(tmp_path: Path) -> None:
         + [merged_pr_row(age, 5.0) for age in (30, 50, 70, 90)]  # baseline: 5h avg
     )
     data_dir = write_events(tmp_path, rows)
-    anomaly = detector.detect_merge_time_anomaly(data_dir)
+    # repo=None everywhere below: rule behavior must not depend on the
+    # developer's .env (ANOMALY_REPO); scoping is tested separately.
+    anomaly = detector.detect_merge_time_anomaly(data_dir, repo=None)
     assert anomaly is not None
     assert anomaly["type"] == "merge_time_anomaly"
     assert anomaly["severity"] == "high"  # 4x baseline
@@ -157,12 +159,12 @@ def test_merge_time_anomaly_detected(tmp_path: Path) -> None:
 
 def test_merge_time_silent_when_stable(tmp_path: Path) -> None:
     rows = [merged_pr_row(age, 6.0) for age in (2, 5, 8, 30, 50, 70)]
-    assert detector.detect_merge_time_anomaly(write_events(tmp_path, rows)) is None
+    assert detector.detect_merge_time_anomaly(write_events(tmp_path, rows), repo=None) is None
 
 
 def test_merge_time_silent_on_thin_data(tmp_path: Path) -> None:
     rows = [merged_pr_row(2, 20.0)] + [merged_pr_row(age, 5.0) for age in (30, 50, 70)]
-    assert detector.detect_merge_time_anomaly(write_events(tmp_path, rows)) is None
+    assert detector.detect_merge_time_anomaly(write_events(tmp_path, rows), repo=None) is None
 
 
 # ── Commit drought ────────────────────────────────────────────────────────────
@@ -171,7 +173,7 @@ def test_commit_drought_detected(tmp_path: Path) -> None:
     # Baseline: 216 pushes across 24-168h ago (1.5/h). Recent: none.
     rows = [push_row(24 + i * (144 / 216)) for i in range(216)]
     data_dir = write_events(tmp_path, rows)
-    anomaly = detector.detect_commit_drought(data_dir)
+    anomaly = detector.detect_commit_drought(data_dir, repo=None)
     assert anomaly is not None
     assert anomaly["type"] == "commit_drought"
     assert anomaly["severity"] == "high"  # zero recent pushes
@@ -181,12 +183,12 @@ def test_commit_drought_detected(tmp_path: Path) -> None:
 def test_commit_drought_silent_when_active(tmp_path: Path) -> None:
     rows = [push_row(24 + i * (144 / 216)) for i in range(216)]
     rows += [push_row(i * 0.5) for i in range(48)]  # 2/h recent
-    assert detector.detect_commit_drought(write_events(tmp_path, rows)) is None
+    assert detector.detect_commit_drought(write_events(tmp_path, rows), repo=None) is None
 
 
 def test_commit_drought_silent_on_quiet_baseline(tmp_path: Path) -> None:
     rows = [push_row(30 + i * 10) for i in range(10)]  # ~0.07/h baseline
-    assert detector.detect_commit_drought(write_events(tmp_path, rows)) is None
+    assert detector.detect_commit_drought(write_events(tmp_path, rows), repo=None) is None
 
 
 # ── Repo scoping ──────────────────────────────────────────────────────────────
@@ -228,7 +230,7 @@ def test_detect_all_combines_rules(tmp_path: Path) -> None:
                            baseline_failures=4, baseline_total=40)
     rows = [push_row(24 + i * (144 / 216)) for i in range(216)]
     data_dir = write_events(tmp_path, rows)
-    types = {a["type"] for a in detector.detect_all(data_dir, ci_dir)}
+    types = {a["type"] for a in detector.detect_all(data_dir, ci_dir, repo=None)}
     assert types == {"ci_failure_spike", "commit_drought"}
 
 
@@ -238,7 +240,7 @@ def test_pipeline_signal_statuses(tmp_path: Path) -> None:
     rows = [push_row(24 + i * (144 / 216)) for i in range(216)]
     data_dir = write_events(tmp_path, rows)
 
-    signal = detector.pipeline_signal(data_dir, ci_dir)
+    signal = detector.pipeline_signal(data_dir, ci_dir, repo=None)
     assert signal["ci_stability"]["status"] == "alert"       # 60% failure rate
     assert signal["commit_cadence"]["status"] == "alert"     # zero recent pushes
     assert signal["pr_velocity"]["status"] == "unknown"      # no PR events at all
@@ -246,7 +248,7 @@ def test_pipeline_signal_statuses(tmp_path: Path) -> None:
 
 
 def test_pipeline_signal_unknown_without_any_data(tmp_path: Path) -> None:
-    signal = detector.pipeline_signal(tmp_path / "events", tmp_path / "ci")
+    signal = detector.pipeline_signal(tmp_path / "events", tmp_path / "ci", repo=None)
     assert all(
         signal[key]["status"] == "unknown"
         for key in ("ci_stability", "pr_velocity", "commit_cadence")

@@ -18,7 +18,7 @@ import time
 import structlog
 from fastapi import APIRouter, HTTPException, Request
 
-from anomaly import detector, store
+from anomaly import detector, evidence, store
 from api import schemas
 from api.diagnosis import anomaly_subject, diagnose
 
@@ -64,11 +64,13 @@ def diagnose_anomaly(anomaly_id: str, request: Request) -> dict:
     if anomaly is None:
         raise HTTPException(status_code=404, detail=f"Unknown anomaly: {anomaly_id}")
 
+    snapshot = evidence.pipeline_snapshot(app_state.data_dir, app_state.ci_dir)
     body = diagnose(
         anomaly_subject(anomaly),
         retriever=app_state.retriever,
         llm=app_state.llm,
         kb_dir=app_state.kb_dir,
+        live_context=evidence.format_snapshot(snapshot),
     )
     result = {"anomaly": anomaly, **body}
     app_state.diagnosis_cache[anomaly_id] = result
@@ -83,24 +85,40 @@ def free_text_query(payload: schemas.QueryRequest, request: Request) -> dict:
         raise HTTPException(status_code=400, detail="Question must not be empty")
 
     app_state = request.app.state
+    snapshot = evidence.pipeline_snapshot(app_state.data_dir, app_state.ci_dir)
     body = diagnose(
         question,
         retriever=app_state.retriever,
         llm=app_state.llm,
         kb_dir=app_state.kb_dir,
+        live_context=evidence.format_snapshot(snapshot),
     )
     return {"question": question, **body}
 
 
 @router.post("/demo/anomaly", response_model=schemas.Anomaly, status_code=201)
 def trigger_demo_anomaly(payload: schemas.DemoAnomalyRequest, request: Request) -> dict:
+    app_state = request.app.state
+
+    if payload.type == "snapshot":
+        # Preferred demo path: a snapshot of the repo's REAL current CI state.
+        snapshot = evidence.pipeline_snapshot(app_state.data_dir, app_state.ci_dir)
+        anomaly = evidence.build_snapshot_anomaly(snapshot)
+        if anomaly is not None:
+            store.save_anomalies([anomaly], anomaly_dir=app_state.anomaly_dir)
+            return anomaly
+        # No CI data to snapshot — fall back to the canned template, which
+        # is at least honestly labeled is_demo.
+        log.warning("snapshot_demo_no_ci_data", fallback="ci_failure_spike template")
+        return store.seed_demo_anomaly("ci_failure_spike", anomaly_dir=app_state.anomaly_dir)
+
     try:
-        return store.seed_demo_anomaly(payload.type, anomaly_dir=request.app.state.anomaly_dir)
+        return store.seed_demo_anomaly(payload.type, anomaly_dir=app_state.anomaly_dir)
     except KeyError:
         raise HTTPException(
             status_code=400,
             detail=f"Unknown demo type: {payload.type!r}. "
-                   f"Valid types: {store.demo_anomaly_types()}",
+                   f"Valid types: {['snapshot', *store.demo_anomaly_types()]}",
         )
 
 

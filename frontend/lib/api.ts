@@ -111,5 +111,5 @@ export const fetchDiagnosis = (anomalyId: string) =>
   get<Diagnosis>(`/diagnose/${encodeURIComponent(anomalyId)}`);
 export const postQuery = (question: string) =>
   post<QueryResponse>("/query", { question });
-export const triggerDemoAnomaly = (type = "ci_failure_spike") =>
+export const triggerDemoAnomaly = (type = "snapshot") =>
   post<Anomaly>("/demo/anomaly", { type });

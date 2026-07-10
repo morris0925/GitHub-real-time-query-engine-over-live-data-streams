@@ -109,4 +109,6 @@ class QueryResponse(BaseModel):
 
 
 class DemoAnomalyRequest(BaseModel):
-    type: str = "ci_failure_spike"
+    # "snapshot" = anomaly built from the repo's real current CI state
+    # (preferred); template names fall back to canned synthetic anomalies.
+    type: str = "snapshot"

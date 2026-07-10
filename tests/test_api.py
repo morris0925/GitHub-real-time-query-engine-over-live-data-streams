@@ -134,7 +134,8 @@ def test_diagnose_full_shape(client: TestClient) -> None:
     assert len(body["similar_cases"]) == 3
     assert all(c["similarity_band"] in ("high", "medium", "low")
                for c in body["similar_cases"])                  # bands, never %
-    assert len(body["raw_evidence"]) == 3
+    assert len(body["raw_evidence"]) == 4                       # snapshot + 3 cases
+    assert body["raw_evidence"][0].startswith("[live pipeline snapshot]")
     assert body["meta"]["llm_provider"] == "stub"               # honest meta
     assert body["meta"]["disclaimer"] == DISCLAIMER
 
@@ -164,6 +165,24 @@ def test_query_round_trip(client: TestClient) -> None:
 
 def test_query_empty_question_is_400(client: TestClient) -> None:
     assert client.post("/query", json={"question": "   "}).status_code == 400
+
+
+# ── Live evidence wiring ──────────────────────────────────────────────────────
+
+def test_query_includes_live_snapshot_in_evidence(client: TestClient) -> None:
+    body = client.post("/query", json={"question": "what is failing?"}).json()
+    assert body["raw_evidence"][0].startswith("[live pipeline snapshot]")
+    # Empty fixture dirs → the snapshot must say so, not invent numbers.
+    assert "no workflow-run data" in body["raw_evidence"][0]
+
+
+def test_demo_snapshot_falls_back_without_ci_data(client: TestClient) -> None:
+    # Fixture has no CI data → snapshot impossible → canned template fallback.
+    response = client.post("/demo/anomaly", json={"type": "snapshot"})
+    assert response.status_code == 201
+    anomaly = response.json()
+    assert anomaly["is_demo"] is True
+    assert anomaly["type"] == "ci_failure_spike"
 
 
 # ── /signal ───────────────────────────────────────────────────────────────────
