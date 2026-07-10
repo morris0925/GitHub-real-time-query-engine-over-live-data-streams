@@ -10,6 +10,7 @@ SELECT
     count(*)     AS merged_count
 FROM read_parquet('{data_glob}')
 WHERE event_type = 'PullRequestEvent'
+  {repo_filter}
   AND json_extract_string(payload_json, '$.action') = 'closed'
   AND json_extract_string(payload_json, '$.pull_request.merged') = 'true'
   AND created_at >= now() - INTERVAL '{since_hours} hours'

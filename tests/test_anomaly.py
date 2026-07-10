@@ -74,7 +74,7 @@ def write_events(tmp_path: Path, rows: list[dict]) -> Path:
             "actor_id": 1,
             "actor_login": "alice",
             "repo_id": 99,
-            "repo_name": "acme/widgets",
+            "repo_name": row.get("repo_name", "acme/widgets"),
             "payload_json": row.get("payload_json"),
             "public": True,
             "created_at": row["created_at"],
@@ -187,6 +187,38 @@ def test_commit_drought_silent_when_active(tmp_path: Path) -> None:
 def test_commit_drought_silent_on_quiet_baseline(tmp_path: Path) -> None:
     rows = [push_row(30 + i * 10) for i in range(10)]  # ~0.07/h baseline
     assert detector.detect_commit_drought(write_events(tmp_path, rows)) is None
+
+
+# ── Repo scoping ──────────────────────────────────────────────────────────────
+
+def test_commit_drought_repo_filter_ignores_other_repos(tmp_path: Path) -> None:
+    # acme/widgets: healthy baseline, zero recent pushes → drought.
+    rows = [push_row(24 + i * (144 / 216)) for i in range(216)]
+    # other/repo: constant recent activity that would mask the drought
+    # if the filter leaked.
+    rows += [
+        {**push_row(i * 0.5), "repo_name": "other/repo"} for i in range(48)
+    ]
+    data_dir = write_events(tmp_path, rows)
+
+    unscoped = detector.detect_commit_drought(data_dir, repo=None)
+    scoped = detector.detect_commit_drought(data_dir, repo="acme/widgets")
+
+    assert unscoped is None                    # other/repo's pushes mask it
+    assert scoped is not None                  # filter isolates the drought
+    assert scoped["repo"] == "acme/widgets"
+    assert scoped["metric"]["recent_pushes_per_hour"] == 0.0
+
+
+def test_merge_time_repo_filter(tmp_path: Path) -> None:
+    rows = (
+        [merged_pr_row(age, 20.0) for age in (2, 5, 8)]
+        + [merged_pr_row(age, 5.0) for age in (30, 50, 70, 90)]
+    )
+    data_dir = write_events(tmp_path, rows)
+    # Filtering to a repo with no events → silent, never an error.
+    assert detector.detect_merge_time_anomaly(data_dir, repo="other/repo") is None
+    assert detector.detect_merge_time_anomaly(data_dir, repo="acme/widgets") is not None
 
 
 # ── detect_all + pipeline_signal ──────────────────────────────────────────────

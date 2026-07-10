@@ -28,11 +28,27 @@ log = structlog.get_logger(__name__)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-GITHUB_EVENTS_URL: str = "https://api.github.com/events"
 KAFKA_BROKER:      str = os.getenv("KAFKA_BROKER", "localhost:9092")
 KAFKA_TOPIC:       str = os.getenv("KAFKA_TOPIC", "github-events")
 POLL_INTERVAL:     int = int(os.getenv("POLL_INTERVAL", "5"))
 GITHUB_TOKEN:      str | None = os.getenv("GITHUB_TOKEN")
+
+# Stream scope: "global" = the whole public firehose (/events);
+# "repo" = one repository's events only (/repos/{repo}/events), so the
+# stream, the CI signal, and the AI knowledge base share one source —
+# the coherent setup for the AI diagnostic layer demo.
+STREAM_MODE: str = os.getenv("STREAM_MODE", "global")
+STREAM_REPO: str = os.getenv("STREAM_REPO") or os.getenv("KB_REPO", "kubernetes/kubernetes")
+
+
+def events_url(mode: str = STREAM_MODE, repo: str = STREAM_REPO) -> str:
+    """The GitHub Events endpoint for the configured stream scope."""
+    if mode == "repo":
+        return f"https://api.github.com/repos/{repo}/events"
+    return "https://api.github.com/events"
+
+
+GITHUB_EVENTS_URL: str = events_url()
 
 
 # ── Kafka setup ───────────────────────────────────────────────────────────────
@@ -89,7 +105,14 @@ def fetch_events(etag: str | None) -> tuple[list[dict], str | None]:
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    log.info("producer_starting", broker=KAFKA_BROKER, topic=KAFKA_TOPIC, poll_interval=POLL_INTERVAL)
+    log.info(
+        "producer_starting",
+        broker=KAFKA_BROKER,
+        topic=KAFKA_TOPIC,
+        poll_interval=POLL_INTERVAL,
+        stream_mode=STREAM_MODE,
+        stream_repo=STREAM_REPO if STREAM_MODE == "repo" else None,
+    )
 
     try:
         producer = create_producer()

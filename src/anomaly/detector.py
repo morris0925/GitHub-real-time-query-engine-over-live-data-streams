@@ -38,6 +38,11 @@ log = structlog.get_logger(__name__)
 
 DATA_DIR: Path = Path(os.getenv("DATA_DIR", "data/events"))
 
+# When set, the event-stream rules (merge time, commit drought) only consider
+# this repo's events — pair with the producer's STREAM_MODE=repo so stream,
+# CI signal, and knowledge base share one source. Empty = whole stream.
+ANOMALY_REPO: str | None = os.getenv("ANOMALY_REPO") or None
+
 WINDOW_HOURS:   int = int(os.getenv("ANOMALY_WINDOW_HOURS", "24"))
 BASELINE_HOURS: int = int(os.getenv("ANOMALY_BASELINE_HOURS", "168"))
 
@@ -102,6 +107,11 @@ def _windows_glob(data_dir: Path) -> str | None:
     return str(data_dir / "**" / "*.parquet")
 
 
+def _repo_filter(repo: str | None) -> str:
+    """SQL fragment restricting event queries to one repo ('' = no filter)."""
+    return f"AND repo_name = '{repo}'" if repo else ""
+
+
 # ── Metric queries (shared by rules and the signal bar) ───────────────────────
 
 def ci_failure_rates(ci_dir: Path = CI_DIR) -> tuple[dict, dict]:
@@ -116,29 +126,36 @@ def ci_failure_rates(ci_dir: Path = CI_DIR) -> tuple[dict, dict]:
     return recent, baseline
 
 
-def merge_times(data_dir: Path = DATA_DIR) -> tuple[dict, dict]:
+def merge_times(
+    data_dir: Path = DATA_DIR, repo: str | None = ANOMALY_REPO
+) -> tuple[dict, dict]:
     """(recent, baseline) avg PR merge-duration rows; empty when no data."""
     glob = _windows_glob(data_dir)
     if glob is None:
         return {}, {}
     recent = _one_row(_load_sql("pr_merge_times.sql").format(
-        data_glob=glob, since_hours=WINDOW_HOURS, until_hours=0))
+        data_glob=glob, since_hours=WINDOW_HOURS, until_hours=0,
+        repo_filter=_repo_filter(repo)))
     baseline = _one_row(_load_sql("pr_merge_times.sql").format(
-        data_glob=glob, since_hours=BASELINE_HOURS, until_hours=WINDOW_HOURS))
+        data_glob=glob, since_hours=BASELINE_HOURS, until_hours=WINDOW_HOURS,
+        repo_filter=_repo_filter(repo)))
     return recent, baseline
 
 
-def push_rates(data_dir: Path = DATA_DIR) -> tuple[dict, dict]:
+def push_rates(
+    data_dir: Path = DATA_DIR, repo: str | None = ANOMALY_REPO
+) -> tuple[dict, dict]:
     """(recent, baseline) PushEvent-rate rows; empty when no data."""
     glob = _windows_glob(data_dir)
     if glob is None:
         return {}, {}
     recent = _one_row(_load_sql("push_rate.sql").format(
         data_glob=glob, since_hours=WINDOW_HOURS, until_hours=0,
-        window_hours=WINDOW_HOURS))
+        window_hours=WINDOW_HOURS, repo_filter=_repo_filter(repo)))
     baseline = _one_row(_load_sql("push_rate.sql").format(
         data_glob=glob, since_hours=BASELINE_HOURS, until_hours=WINDOW_HOURS,
-        window_hours=BASELINE_HOURS - WINDOW_HOURS))
+        window_hours=BASELINE_HOURS - WINDOW_HOURS,
+        repo_filter=_repo_filter(repo)))
     return recent, baseline
 
 
@@ -173,9 +190,11 @@ def detect_ci_failure_spike(ci_dir: Path = CI_DIR) -> dict | None:
     )
 
 
-def detect_merge_time_anomaly(data_dir: Path = DATA_DIR) -> dict | None:
+def detect_merge_time_anomaly(
+    data_dir: Path = DATA_DIR, repo: str | None = ANOMALY_REPO
+) -> dict | None:
     """Average PR merge duration stretched: recent > 1.5 × baseline."""
-    recent, baseline = merge_times(data_dir)
+    recent, baseline = merge_times(data_dir, repo)
     recent_avg = recent.get("avg_merge_hours")
     base_avg = baseline.get("avg_merge_hours")
     if recent_avg is None or base_avg is None or base_avg <= 0:
@@ -202,12 +221,15 @@ def detect_merge_time_anomaly(data_dir: Path = DATA_DIR) -> dict | None:
             "recent_merged": recent.get("merged_count"),
             "ratio": ratio,
         },
+        repo=repo,
     )
 
 
-def detect_commit_drought(data_dir: Path = DATA_DIR) -> dict | None:
+def detect_commit_drought(
+    data_dir: Path = DATA_DIR, repo: str | None = ANOMALY_REPO
+) -> dict | None:
     """PushEvent rate collapsed: recent < 0.3 × baseline."""
-    recent, baseline = push_rates(data_dir)
+    recent, baseline = push_rates(data_dir, repo)
     recent_rate = recent.get("pushes_per_hour")
     base_rate = baseline.get("pushes_per_hour")
     if recent_rate is None or base_rate is None:
@@ -232,17 +254,22 @@ def detect_commit_drought(data_dir: Path = DATA_DIR) -> dict | None:
             "recent_pushes_per_hour": recent_rate,
             "baseline_pushes_per_hour": base_rate,
         },
+        repo=repo,
     )
 
 
-def detect_all(data_dir: Path = DATA_DIR, ci_dir: Path = CI_DIR) -> list[dict]:
+def detect_all(
+    data_dir: Path = DATA_DIR,
+    ci_dir: Path = CI_DIR,
+    repo: str | None = ANOMALY_REPO,
+) -> list[dict]:
     """Run every rule; silent rules simply contribute nothing."""
     anomalies = [
         anomaly
         for anomaly in (
             detect_ci_failure_spike(ci_dir),
-            detect_merge_time_anomaly(data_dir),
-            detect_commit_drought(data_dir),
+            detect_merge_time_anomaly(data_dir, repo),
+            detect_commit_drought(data_dir, repo),
         )
         if anomaly is not None
     ]
@@ -256,7 +283,11 @@ def _component(status: str, detail: dict) -> dict:
     return {"status": status, **detail}
 
 
-def pipeline_signal(data_dir: Path = DATA_DIR, ci_dir: Path = CI_DIR) -> dict:
+def pipeline_signal(
+    data_dir: Path = DATA_DIR,
+    ci_dir: Path = CI_DIR,
+    repo: str | None = ANOMALY_REPO,
+) -> dict:
     """
     The three signal-bar components, each ok/warn/alert/unknown.
 
@@ -275,7 +306,7 @@ def pipeline_signal(data_dir: Path = DATA_DIR, ci_dir: Path = CI_DIR) -> dict:
             "runs": ci_recent.get("run_count"),
         })
 
-    m_recent, m_base = merge_times(data_dir)
+    m_recent, m_base = merge_times(data_dir, repo)
     recent_avg, base_avg = m_recent.get("avg_merge_hours"), m_base.get("avg_merge_hours")
     if recent_avg is None or base_avg is None or base_avg <= 0:
         pr = _component("unknown", {"avg_merge_hours": recent_avg})
@@ -287,7 +318,7 @@ def pipeline_signal(data_dir: Path = DATA_DIR, ci_dir: Path = CI_DIR) -> dict:
             "baseline_avg_merge_hours": base_avg,
         })
 
-    p_recent, p_base = push_rates(data_dir)
+    p_recent, p_base = push_rates(data_dir, repo)
     push_rate, push_base = p_recent.get("pushes_per_hour"), p_base.get("pushes_per_hour")
     if push_rate is None or push_base is None or push_base < MIN_BASELINE_PUSH_RATE:
         commits = _component("unknown", {"pushes_per_hour": push_rate})
