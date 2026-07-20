@@ -71,8 +71,11 @@ export default function IncidentFeed({
               <div className="mb-1 flex items-center gap-2">
                 <SeverityBadge severity={anomaly.severity} />
                 {anomaly.is_demo && (
-                  <span className="rounded border border-slate-600 px-1.5 py-0.5 text-[10px] uppercase text-slate-400">
-                    demo
+                  <span
+                    className="rounded border border-slate-600 px-1.5 py-0.5 text-[10px] uppercase text-slate-400"
+                    title="Manually captured live-CI snapshot (real data), not an auto-detected anomaly"
+                  >
+                    snapshot
                   </span>
                 )}
                 <span className="ml-auto text-[11px] text-slate-500">

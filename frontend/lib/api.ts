@@ -111,5 +111,7 @@ export const fetchDiagnosis = (anomalyId: string) =>
   get<Diagnosis>(`/diagnose/${encodeURIComponent(anomalyId)}`);
 export const postQuery = (question: string) =>
   post<QueryResponse>("/query", { question });
-export const triggerDemoAnomaly = (type = "snapshot") =>
-  post<Anomaly>("/demo/anomaly", { type });
+// Capture the repo's REAL current CI state as an anomaly. No synthetic
+// fallback: if there is no CI data yet the API returns 503, surfaced to the
+// user rather than papered over with invented numbers.
+export const snapshotCiState = () => post<Anomaly>("/snapshot", {});

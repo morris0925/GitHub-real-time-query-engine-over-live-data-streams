@@ -106,9 +106,3 @@ class QueryResponse(BaseModel):
     similar_cases: list[SimilarCase]
     raw_evidence: list[str]
     meta: DiagnosisMeta
-
-
-class DemoAnomalyRequest(BaseModel):
-    # "snapshot" = anomaly built from the repo's real current CI state
-    # (preferred); template names fall back to canned synthetic anomalies.
-    type: str = "snapshot"

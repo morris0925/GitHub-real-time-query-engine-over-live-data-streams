@@ -132,11 +132,22 @@ class HashEmbeddings:
 
 
 def get_provider() -> EmbeddingProvider:
-    """Voyage when a key is configured, otherwise the loud hash stub."""
-    if VOYAGE_API_KEY:
-        return VoyageEmbeddings(api_key=VOYAGE_API_KEY)
-    log.warning("no_voyage_key", fallback="hash-stub embeddings — retrieval quality is meaningless")
-    return HashEmbeddings()
+    """
+    The real semantic embedding provider. Requires VOYAGE_API_KEY.
+
+    Raises RuntimeError when no key is configured — the service refuses to run
+    retrieval on meaningless hash vectors. HashEmbeddings still exists as a
+    test double, but it is only ever reachable by explicit injection, never
+    returned here in a running service.
+    """
+    api_key = os.getenv("VOYAGE_API_KEY")
+    if api_key:
+        return VoyageEmbeddings(api_key=api_key)
+    raise RuntimeError(
+        "VOYAGE_API_KEY is not set. Real semantic retrieval requires it; "
+        "this service will not fall back to meaningless hash vectors. "
+        "Set the key (see .env.example) or inject a provider for tests."
+    )
 
 
 # ── Embedding-file builder ────────────────────────────────────────────────────

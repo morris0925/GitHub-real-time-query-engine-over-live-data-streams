@@ -13,7 +13,7 @@ import {
   fetchAnomalies,
   fetchDiagnosis,
   postQuery,
-  triggerDemoAnomaly,
+  snapshotCiState,
 } from "@/lib/api";
 import SignalBar from "@/components/SignalBar";
 import IncidentFeed from "@/components/IncidentFeed";
@@ -76,14 +76,19 @@ export default function Home() {
       .finally(() => setPanelLoading(false));
   }, []);
 
-  const seedDemo = useCallback(() => {
+  const snapshotCi = useCallback(() => {
     setSeeding(true);
-    triggerDemoAnomaly()
+    setFeedError(null);
+    snapshotCiState()
       .then(async (anomaly) => {
         await refreshFeed();
         selectAnomaly(anomaly.anomaly_id);
       })
-      .catch((err: Error) => setFeedError(err.message))
+      .catch((err: Error) =>
+        setFeedError(
+          `No live CI state to snapshot yet — start the pipeline and CI fetch, then retry. (${err.message})`,
+        ),
+      )
       .finally(() => setSeeding(false));
   }, [refreshFeed, selectAnomaly]);
 
@@ -94,12 +99,12 @@ export default function Home() {
           StreamLens <span className="text-slate-400">/ AI Diagnostics</span>
         </h1>
         <button
-          onClick={seedDemo}
+          onClick={snapshotCi}
           disabled={seeding}
           className="rounded-md border border-slate-600 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:border-slate-500 disabled:opacity-40"
-          title="Seed a synthetic anomaly — live GitHub events may not produce one on cue"
+          title="Capture the repo's real current CI failure rate from the live pipeline — no synthetic data"
         >
-          {seeding ? "Seeding…" : "Trigger demo anomaly"}
+          {seeding ? "Snapshotting…" : "Snapshot live CI"}
         </button>
       </header>
 

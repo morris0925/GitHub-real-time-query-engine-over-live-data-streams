@@ -3,30 +3,56 @@ tests/test_api.py — Endpoint tests for the FastAPI diagnostic service
 
 Tests cover:
   1. /health — provider names surfaced honestly (stub/hash in tests)
-  2. /demo/anomaly + /anomalies — seeding shows up in the feed; bad type → 400
-  3. /diagnose/{id} — full response shape (§2), trust fields (§4), caching,
+  2. /anomalies — stored (real) anomalies show up in the feed
+  3. /snapshot — 503 when there is no CI data (no synthetic fallback)
+  4. /diagnose/{id} — full response shape (§2), trust fields (§4), caching,
      404 on unknown IDs, stub-LLM parse path
-  4. /query — RAG + LLM round trip; empty question → 400
-  5. /signal — three components + honest caption
+  5. /query — RAG + LLM round trip; empty question → 400
+  6. /signal — three components + honest caption
+  7. get_llm / get_provider — raise loudly when their API key is missing
 
 Everything runs offline: hash embeddings, stub LLM, tmp_path Parquet dirs
-injected through create_app().
+injected through create_app(). No canned/synthetic anomalies exist anymore;
+tests that need an anomaly persist a real-shaped one via store.save_anomalies.
 
 Run with:
     PYTHONPATH=src pytest tests/test_api.py -v
 """
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from anomaly import store
 from api.main import create_app
-from api.diagnosis import StubLLM, _parse_llm_json
+from api.diagnosis import StubLLM, _parse_llm_json, get_llm
 from api.schemas import AI_NOTICE, DISCLAIMER
 from knowledge import ingest
-from knowledge.embeddings import HashEmbeddings, build_embeddings_file
+from knowledge.embeddings import HashEmbeddings, build_embeddings_file, get_provider
+
+
+def _save_real_anomaly(anomaly_dir: Path, anomaly_id: str = "ci-2026071812") -> dict:
+    """
+    Persist a real-shaped anomaly (as the detector / CI snapshot would emit)
+    so endpoint tests have something to diagnose without any synthetic seeding.
+    """
+    anomaly = {
+        "anomaly_id": anomaly_id,
+        "type": "ci_failure_spike",
+        "title": "CI failure rate 40% (10 runs)",
+        "severity": "high",
+        "description": "Recent CI failure rate is 40% over 10 runs.",
+        "metric": {"recent_failure_rate": 0.4, "recent_runs": 10},
+        "repo": "acme/widgets",
+        "detected_at": datetime.now(tz=timezone.utc),
+        "is_demo": False,
+    }
+    anomaly_dir.mkdir(parents=True, exist_ok=True)
+    store.save_anomalies([anomaly], anomaly_dir=anomaly_dir)
+    return anomaly
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -95,33 +121,31 @@ def test_health_reports_providers(client: TestClient) -> None:
     assert body["disclaimer"] == DISCLAIMER
 
 
-# ── /demo/anomaly + /anomalies ────────────────────────────────────────────────
+# ── /anomalies + /snapshot ────────────────────────────────────────────────────
 
 def test_empty_feed_initially(client: TestClient) -> None:
     assert client.get("/anomalies").json() == []
 
 
-def test_demo_anomaly_appears_in_feed(client: TestClient) -> None:
-    created = client.post("/demo/anomaly", json={"type": "ci_failure_spike"})
-    assert created.status_code == 201
-    anomaly = created.json()
-    assert anomaly["is_demo"] is True
-    assert anomaly["severity"] == "high"
-
+def test_saved_anomaly_appears_in_feed(client: TestClient, tmp_path: Path) -> None:
+    anomaly = _save_real_anomaly(tmp_path / "anomalies")
     feed = client.get("/anomalies").json()
-    assert [a["anomaly_id"] for a in feed] == [anomaly["anomaly_id"]]
+    assert anomaly["anomaly_id"] in [a["anomaly_id"] for a in feed]
 
 
-def test_demo_anomaly_unknown_type_is_400(client: TestClient) -> None:
-    response = client.post("/demo/anomaly", json={"type": "nonsense"})
-    assert response.status_code == 400
-    assert "Valid types" in response.json()["detail"]
+def test_snapshot_without_ci_data_is_503(client: TestClient) -> None:
+    # Fixture has no CI data → snapshot is impossible → 503, never a canned
+    # synthetic anomaly. The feed must not gain an invented incident.
+    response = client.post("/snapshot")
+    assert response.status_code == 503
+    assert "No CI data" in response.json()["detail"]
+    assert client.get("/anomalies").json() == []
 
 
 # ── /diagnose/{id} ────────────────────────────────────────────────────────────
 
-def test_diagnose_full_shape(client: TestClient) -> None:
-    anomaly = client.post("/demo/anomaly", json={"type": "ci_failure_spike"}).json()
+def test_diagnose_full_shape(client: TestClient, tmp_path: Path) -> None:
+    anomaly = _save_real_anomaly(tmp_path / "anomalies")
     body = client.get(f"/diagnose/{anomaly['anomaly_id']}").json()
 
     # §2 ordering blocks all present
@@ -140,8 +164,8 @@ def test_diagnose_full_shape(client: TestClient) -> None:
     assert body["meta"]["disclaimer"] == DISCLAIMER
 
 
-def test_diagnose_is_cached(client: TestClient) -> None:
-    anomaly = client.post("/demo/anomaly", json={"type": "commit_drought"}).json()
+def test_diagnose_is_cached(client: TestClient, tmp_path: Path) -> None:
+    anomaly = _save_real_anomaly(tmp_path / "anomalies")
     first = client.get(f"/diagnose/{anomaly['anomaly_id']}").json()
     second = client.get(f"/diagnose/{anomaly['anomaly_id']}").json()
     assert first["meta"]["generated_at"] == second["meta"]["generated_at"]
@@ -176,13 +200,18 @@ def test_query_includes_live_snapshot_in_evidence(client: TestClient) -> None:
     assert "no workflow-run data" in body["raw_evidence"][0]
 
 
-def test_demo_snapshot_falls_back_without_ci_data(client: TestClient) -> None:
-    # Fixture has no CI data → snapshot impossible → canned template fallback.
-    response = client.post("/demo/anomaly", json={"type": "snapshot"})
-    assert response.status_code == 201
-    anomaly = response.json()
-    assert anomaly["is_demo"] is True
-    assert anomaly["type"] == "ci_failure_spike"
+# ── Loud failure when a real provider key is missing ──────────────────────────
+
+def test_get_llm_raises_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        get_llm()
+
+
+def test_get_provider_raises_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="VOYAGE_API_KEY"):
+        get_provider()
 
 
 # ── /signal ───────────────────────────────────────────────────────────────────

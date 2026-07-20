@@ -1,20 +1,19 @@
 """
-anomaly/store.py — Anomaly Parquet store + demo seeding
+anomaly/store.py — Anomaly Parquet store
 
 Persists detected anomalies to data/anomalies/anomalies.parquet so the API
 can serve a stable incident feed (with stable IDs for /diagnose/:id) across
 detection runs and restarts. Deduplicates by anomaly_id: the detector emits
 deterministic per-(type, hour) IDs, so re-running detection is idempotent.
 
-Also home of seed_demo_anomaly() — live GitHub events may not conveniently
-produce an anomaly during a live demo, so the dashboard has a button that
-plants a realistic synthetic one, clearly flagged is_demo=True.
+Anomalies come from exactly two real sources: the rule-based detector
+(detector.py) and the manual live-CI snapshot (evidence.build_snapshot_anomaly).
+There is deliberately no synthetic/demo seeding here — the incident feed only
+ever shows numbers that came from real data.
 """
 
 import json
 import os
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pyarrow as pa
@@ -42,51 +41,6 @@ ANOMALY_SCHEMA = pa.schema(
         pa.field("is_demo",     pa.bool_(),                   nullable=False),
     ]
 )
-
-# Realistic synthetic anomalies for the demo button, one per type.
-_DEMO_TEMPLATES: dict[str, dict] = {
-    "ci_failure_spike": {
-        "title": "CI failure rate spiked to 46%",
-        "severity": "high",
-        "description": (
-            "CI failure rate over the last 24h is 46% (61 runs), "
-            "vs an 8% baseline."
-        ),
-        "metric": {
-            "recent_failure_rate": 0.46,
-            "baseline_failure_rate": 0.08,
-            "recent_runs": 61,
-            "baseline_runs": 412,
-        },
-    },
-    "merge_time_anomaly": {
-        "title": "PR merge time 2.4x above baseline",
-        "severity": "medium",
-        "description": (
-            "PRs merged in the last 24h averaged 31.2h open-to-merge, "
-            "vs a 13.0h baseline."
-        ),
-        "metric": {
-            "recent_avg_merge_hours": 31.2,
-            "baseline_avg_merge_hours": 13.0,
-            "recent_merged": 9,
-            "ratio": 2.4,
-        },
-    },
-    "commit_drought": {
-        "title": "Commit activity dropped to 0.4/h",
-        "severity": "low",
-        "description": (
-            "PushEvents averaged 0.4/h over the last 24h, "
-            "vs a 3.1/h baseline."
-        ),
-        "metric": {
-            "recent_pushes_per_hour": 0.4,
-            "baseline_pushes_per_hour": 3.1,
-        },
-    },
-}
-
 
 def _path(anomaly_dir: Path) -> Path:
     return anomaly_dir / ANOMALIES_FILENAME
@@ -141,31 +95,3 @@ def save_anomalies(anomalies: list[dict], anomaly_dir: Path = ANOMALY_DIR) -> li
     return merged
 
 
-def seed_demo_anomaly(
-    anomaly_type: str = "ci_failure_spike",
-    anomaly_dir: Path = ANOMALY_DIR,
-) -> dict:
-    """
-    Plant a synthetic anomaly (unique ID, is_demo=True) and persist it.
-    Raises KeyError for unknown types — the API maps that to a 400.
-    """
-    template = _DEMO_TEMPLATES[anomaly_type]
-    anomaly = {
-        "anomaly_id": f"demo-{uuid.uuid4().hex[:8]}",
-        "type": anomaly_type,
-        "title": template["title"],
-        "severity": template["severity"],
-        "description": template["description"],
-        "metric": dict(template["metric"]),
-        "repo": None,
-        "detected_at": datetime.now(tz=timezone.utc),
-        "is_demo": True,
-    }
-    save_anomalies([anomaly], anomaly_dir)
-    log.info("demo_anomaly_seeded", anomaly_id=anomaly["anomaly_id"], type=anomaly_type)
-    return anomaly
-
-
-def demo_anomaly_types() -> list[str]:
-    """Types the demo button can seed."""
-    return list(_DEMO_TEMPLATES)

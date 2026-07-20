@@ -5,9 +5,11 @@ Run locally:
     PYTHONPATH=src uvicorn api.main:app --host 127.0.0.1 --port 8000
 
 All heavy state (retriever with its in-memory DuckDB table, LLM client,
-diagnosis cache) lives on app.state, built once at startup. create_app()
-takes explicit overrides so tests can inject tmp dirs, the hash embedding
-provider, and the stub LLM without touching env vars.
+diagnosis cache) lives on app.state. The embedding provider and LLM client
+are resolved lazily on first use (both raise without their API key, and we
+must not trigger that at import time), so create_app() itself never needs a
+key. Tests inject tmp dirs, the hash embedding provider, and the stub LLM
+explicitly through create_app()'s overrides.
 """
 
 import os
@@ -20,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from anomaly.ci_fetch import CI_DIR
 from anomaly.detector import DATA_DIR
 from anomaly.store import ANOMALY_DIR
-from api.diagnosis import LLMClient, get_llm
+from api.diagnosis import LLMClient
 from api.routes import router
 from knowledge.embeddings import KB_DIR, EmbeddingProvider
 from knowledge.retriever import Retriever
@@ -52,7 +54,9 @@ def create_app(
     app.state.ci_dir = ci_dir
     app.state.anomaly_dir = anomaly_dir
     app.state.retriever = Retriever(kb_dir=kb_dir, provider=embedding_provider)
-    app.state.llm = llm or get_llm()
+    # Resolved lazily on first diagnose/query (get_llm raises without a key);
+    # building it here would fail at import time in keyless CI. Tests inject.
+    app.state.llm = llm
     app.state.diagnosis_cache = {}   # anomaly_id → Diagnosis dict
     app.state.anomalies_ran_at = 0.0  # monotonic ts of last detection sweep
 

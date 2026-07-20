@@ -97,12 +97,22 @@ class StubLLM:
 
 
 def get_llm() -> LLMClient:
-    """Anthropic when a key is configured, otherwise the loud stub."""
+    """
+    The real Claude client. Requires ANTHROPIC_API_KEY.
+
+    Raises RuntimeError when no key is configured — the service refuses to
+    serve placeholder text as if it were a diagnosis. StubLLM still exists as
+    a test double, but it is only ever reachable by explicit injection
+    (create_app(llm=StubLLM())), never returned here in a running service.
+    """
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if api_key:
         return AnthropicLLM(api_key=api_key)
-    log.warning("no_anthropic_key", fallback="stub LLM — diagnoses are placeholders")
-    return StubLLM()
+    raise RuntimeError(
+        "ANTHROPIC_API_KEY is not set. Real diagnoses require a live model; "
+        "this service will not fall back to canned placeholder text. "
+        "Set the key (see .env.example) or inject a client for tests."
+    )
 
 
 # ── Prompt assembly / response parsing ────────────────────────────────────────

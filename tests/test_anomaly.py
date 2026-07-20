@@ -274,21 +274,6 @@ def test_store_empty_dir(tmp_path: Path) -> None:
     assert store.load_anomalies(anomaly_dir=tmp_path) == []
 
 
-def test_seed_demo_anomaly(tmp_path: Path) -> None:
-    seeded = store.seed_demo_anomaly("merge_time_anomaly", anomaly_dir=tmp_path)
-    assert seeded["is_demo"] is True
-    assert seeded["anomaly_id"].startswith("demo-")
-
-    loaded = store.load_anomalies(anomaly_dir=tmp_path)
-    assert loaded[0]["anomaly_id"] == seeded["anomaly_id"]
-    assert loaded[0]["metric"]["recent_avg_merge_hours"] == pytest.approx(31.2)
-
-
-def test_seed_demo_anomaly_unknown_type(tmp_path: Path) -> None:
-    with pytest.raises(KeyError):
-        store.seed_demo_anomaly("nonsense_type", anomaly_dir=tmp_path)
-
-
 def test_ci_run_schema_columns() -> None:
     assert CI_RUN_SCHEMA.names == [
         "run_id", "repo", "workflow_name", "status", "conclusion", "created_at"
