@@ -19,8 +19,10 @@ import structlog
 from fastapi import APIRouter, HTTPException, Request
 
 from anomaly import detector, evidence, store
+from anomaly.ci_fetch import latest_run_time
 from api import schemas
 from api.diagnosis import anomaly_subject, diagnose, get_llm
+from storage.reader import get_latest_event_time
 
 log = structlog.get_logger(__name__)
 
@@ -130,11 +132,23 @@ def snapshot_ci_state(request: Request) -> dict:
 
 @router.get("/health")
 def health(request: Request) -> dict:
+    """
+    Liveness + data-freshness gate.
+
+    A red /health before a demo (kb_ready false, *_events_at null, or a
+    *_events_at timestamp far in the past) is the signal to fix the
+    environment before pressing the button — see docs/roadmap.md P0.2.
+    """
     app_state = request.app.state
+    latest_event = get_latest_event_time(app_state.data_dir)
+    latest_ci_run = latest_run_time(app_state.ci_dir)
     return {
         "status": "ok",
         "kb_ready": app_state.retriever.ready,
+        "kb_case_count": app_state.retriever.case_count,
         "embedding_provider": app_state.retriever.provider_name,
         "llm_provider": _llm(app_state).name,
+        "latest_event_at": latest_event,
+        "latest_ci_run_at": latest_ci_run,
         "disclaimer": schemas.DISCLAIMER,
     }

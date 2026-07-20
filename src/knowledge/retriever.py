@@ -63,16 +63,34 @@ class Retriever:
         provider: EmbeddingProvider | None = None,
     ) -> None:
         self._kb_dir = kb_dir
-        self._provider = provider or get_provider()
+        # Resolved lazily: get_provider() raises without a key, and we must
+        # not force that at construction (create_app runs at import time, and
+        # CI / tooling import the app with no keys set). Tests inject a
+        # provider explicitly, so they never hit the lazy path.
+        self._provider = provider
         self._conn: duckdb.DuckDBPyConnection = duckdb.connect()
         self._dim: int = 0
         self.ready: bool = False
         self.reload()
 
+    def _get_provider(self) -> EmbeddingProvider:
+        """Resolve the embedding provider on first use (raises without a key)."""
+        if self._provider is None:
+            self._provider = get_provider()
+        return self._provider
+
     @property
     def provider_name(self) -> str:
         """Which embedding provider is active — surfaced in API responses."""
-        return self._provider.name
+        return self._get_provider().name
+
+    @property
+    def case_count(self) -> int:
+        """Number of cases currently loaded — surfaced in /health for freshness."""
+        if not self.ready:
+            return 0
+        row = self._conn.execute("SELECT count(*) FROM kb").fetchone()
+        return int(row[0]) if row else 0
 
     def reload(self) -> None:
         """(Re)load the Parquet files into the in-memory table + index."""
@@ -125,7 +143,7 @@ class Retriever:
         if not self.ready:
             return []
 
-        (vector,) = self._provider.embed([query_text])
+        (vector,) = self._get_provider().embed([query_text])
         cursor = self._conn.execute(
             f"SELECT * EXCLUDE (embedding), "
             f"array_cosine_similarity(embedding, CAST(? AS FLOAT[{self._dim}])) AS similarity "

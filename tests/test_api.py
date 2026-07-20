@@ -27,11 +27,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from anomaly import store
+from anomaly.ci_fetch import write_runs
 from api.main import create_app
 from api.diagnosis import StubLLM, _parse_llm_json, get_llm
 from api.schemas import AI_NOTICE, DISCLAIMER
 from knowledge import ingest
 from knowledge.embeddings import HashEmbeddings, build_embeddings_file, get_provider
+from storage.writer import write_batch
 
 
 def _save_real_anomaly(anomaly_dir: Path, anomaly_id: str = "ci-2026071812") -> dict:
@@ -116,9 +118,56 @@ def test_health_reports_providers(client: TestClient) -> None:
     body = client.get("/health").json()
     assert body["status"] == "ok"
     assert body["kb_ready"] is True
+    assert body["kb_case_count"] == 3
     assert body["embedding_provider"] == "hash-stub"
     assert body["llm_provider"] == "stub"
     assert body["disclaimer"] == DISCLAIMER
+
+
+def test_health_freshness_null_when_no_data(client: TestClient) -> None:
+    """No events or CI runs ingested yet → freshness fields are null, not fake."""
+    body = client.get("/health").json()
+    assert body["latest_event_at"] is None
+    assert body["latest_ci_run_at"] is None
+
+
+def test_health_freshness_reflects_real_data(client: TestClient, tmp_path: Path) -> None:
+    event_time = datetime(2026, 7, 18, 12, 0, 0, tzinfo=timezone.utc)
+    write_batch(
+        [
+            {
+                "id": "e1",
+                "type": "PushEvent",
+                "actor": {"id": 1, "login": "alice"},
+                "repo": {"id": 1, "name": "acme/widgets"},
+                "payload": {},
+                "public": True,
+                "created_at": event_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        ],
+        data_dir=tmp_path / "events",
+    )
+    ci_dir = tmp_path / "ci_runs"
+    ci_run_time = datetime(2026, 7, 18, 13, 0, 0, tzinfo=timezone.utc)
+    write_runs(
+        [
+            {
+                "run_id": 1,
+                "repo": "acme/widgets",
+                "workflow_name": "ci",
+                "status": "completed",
+                "conclusion": "success",
+                "created_at": ci_run_time,
+            }
+        ],
+        ci_dir=ci_dir,
+    )
+
+    body = client.get("/health").json()
+    # DuckDB returns timestamps in the local session timezone, so compare by
+    # instant (parsed datetime) rather than exact string.
+    assert datetime.fromisoformat(body["latest_event_at"]) == event_time
+    assert datetime.fromisoformat(body["latest_ci_run_at"]) == ci_run_time
 
 
 # ── /anomalies + /snapshot ────────────────────────────────────────────────────

@@ -18,6 +18,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
@@ -95,6 +96,22 @@ def write_runs(runs: list[dict], ci_dir: Path = CI_DIR) -> Path:
     pq.write_table(table, path)
     log.info("ci_runs_written", path=str(path), rows=table.num_rows)
     return path
+
+
+def latest_run_time(ci_dir: Path = CI_DIR) -> datetime | None:
+    """
+    Return the created_at of the most recently fetched CI run.
+
+    Returns None if runs.parquet doesn't exist yet. Used by /health to
+    report CI-fetch freshness.
+    """
+    path = ci_dir / RUNS_FILENAME
+    if not path.exists():
+        return None
+    result = duckdb.connect().execute(
+        f"SELECT MAX(created_at) AS latest FROM read_parquet('{path}')"
+    ).fetchone()
+    return result[0] if result else None
 
 
 def main() -> None:

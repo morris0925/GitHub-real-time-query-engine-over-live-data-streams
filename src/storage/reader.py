@@ -27,6 +27,8 @@ Key design decisions:
    not needed yet.
 """
 
+from datetime import datetime
+
 import duckdb
 from pathlib import Path
 import structlog
@@ -207,6 +209,21 @@ def get_total_event_count(data_dir: Path = DEFAULT_DATA_DIR) -> int:
 
     result = _execute(f"SELECT COUNT(*) AS n FROM read_parquet('{glob}')")
     return result[0]["n"] if result else 0
+
+
+def get_latest_event_time(data_dir: Path = DEFAULT_DATA_DIR) -> datetime | None:
+    """
+    Return the created_at of the most recently ingested event.
+
+    Returns None if no data exists yet. Used by /health to report ingest
+    freshness — "when did the newest event land."
+    """
+    if not list(data_dir.glob("**/*.parquet")):
+        return None
+
+    glob = _data_glob(data_dir)
+    result = _execute(f"SELECT MAX(created_at) AS latest FROM read_parquet('{glob}')")
+    return result[0]["latest"] if result else None
 
 
 DEFAULT_DLQ_DIR = Path("data/dlq")
