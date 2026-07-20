@@ -44,6 +44,29 @@ Why write_batch now returns list[Path]:
 A single batch from Kafka may contain events from different dates —
 e.g. a consumer restart replaying yesterday's and today's events together.
 We group them by partition key and write one file per group.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Delivery-semantics guarantee: at-least-once ingest, idempotent write
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+consumer.py commits Kafka offsets only AFTER write_batch() returns
+successfully (see its "Offset commit ordering" docstring). If the process
+crashes between the write and the commit, Kafka replays the un-committed
+messages on restart — the same event_id can reach write_batch() twice,
+either within one batch (a Kafka poll() returning a redelivered message
+alongside new ones) or across two separate batches (a full restart).
+
+write_batch() absorbs that redelivery so storage stays exactly-once even
+though ingest is only at-least-once:
+  1. Rows with an event_id already seen earlier in the SAME batch are
+     dropped, keeping the first occurrence.
+  2. Before writing a partition's rows, we read back the event_ids already
+     on disk in that date=.../ directory (cheap: only the event_id column)
+     and drop any row that's already stored there.
+A partition whose rows are entirely duplicates is skipped — no empty file
+is written, and it doesn't appear in the returned path list.
+
+Net guarantee: **at-least-once Kafka delivery + idempotent Parquet write
+= each GitHub event_id is stored at most once.**
 """
 
 import json
@@ -143,6 +166,27 @@ def _partition_key(
     return created_at.strftime("%Y-%m-%d")
 
 
+def _existing_event_ids(partition_dir: Path) -> set[str]:
+    """
+    Return the event_id values already written to partition_dir.
+
+    Reads only the event_id column of each existing Parquet file, so this
+    stays cheap even as a partition accumulates many files between
+    compaction runs. Used to make write_batch idempotent across batches
+    (see the "Delivery-semantics guarantee" note at the top of this file).
+    """
+    if not partition_dir.exists():
+        return set()
+
+    ids: set[str] = set()
+    for file_path in partition_dir.glob("*.parquet"):
+        try:
+            ids.update(pq.read_table(file_path, columns=["event_id"])["event_id"].to_pylist())
+        except Exception as exc:
+            log.warning("dedupe_scan_failed", path=str(file_path), error=str(exc))
+    return ids
+
+
 def _write_rows_to_partition(
     rows: list[dict],
     partition_dir: Path,
@@ -203,10 +247,24 @@ def write_batch(
     # ── Step 1: flatten all events ────────────────────────────────────────────
     rows: list[dict] = [flatten_event(e, ingested_at) for e in events]
 
+    # ── Step 1b: drop duplicates within this batch (keep first occurrence) ────
+    # A redelivered Kafka message can land in the same poll() as new events.
+    seen_in_batch: set[str] = set()
+    deduped_rows: list[dict] = []
+    for row in rows:
+        if row["event_id"] in seen_in_batch:
+            continue
+        seen_in_batch.add(row["event_id"])
+        deduped_rows.append(row)
+
+    dropped_in_batch = len(rows) - len(deduped_rows)
+    if dropped_in_batch:
+        log.warning("duplicate_events_in_batch", count=dropped_in_batch)
+
     # ── Step 2: group rows by partition key ───────────────────────────────────
     # defaultdict(list) means groups["2026-06-25"] auto-initialises to []
     groups: dict[str, list[dict]] = defaultdict(list)
-    for row in rows:
+    for row in deduped_rows:
         key = _partition_key(row["created_at"], ingested_at, threshold_hours)
         groups[key].append(row)
 
@@ -220,15 +278,30 @@ def write_batch(
             destination=f"date={LATE_PARTITION_KEY}",
         )
 
-    # ── Step 3: write one file per partition ──────────────────────────────────
+    # ── Step 3: write one file per partition, skipping already-stored rows ────
     written: list[Path] = []
     for key, partition_rows in groups.items():
         partition_dir = data_dir / f"date={key}"
-        path = _write_rows_to_partition(partition_rows, partition_dir)
+
+        already_stored = _existing_event_ids(partition_dir)
+        new_rows = [r for r in partition_rows if r["event_id"] not in already_stored]
+
+        dropped_already_stored = len(partition_rows) - len(new_rows)
+        if dropped_already_stored:
+            log.warning(
+                "duplicate_events_already_stored",
+                count=dropped_already_stored,
+                partition=key,
+            )
+
+        if not new_rows:
+            continue
+
+        path = _write_rows_to_partition(new_rows, partition_dir)
         written.append(path)
         log.info(
             "batch_written",
-            rows=len(partition_rows),
+            rows=len(new_rows),
             path=str(path),
             partition=key,
         )

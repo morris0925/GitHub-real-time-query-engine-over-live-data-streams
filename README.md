@@ -174,6 +174,26 @@ advanced. On restart, the consumer re-reads and re-processes those messages.
 The batch may be processed twice — but it will never be silently dropped.
 This is the standard "at-least-once" delivery guarantee.
 
+### Idempotent write (making storage exactly-once on top of at-least-once ingest)
+
+At-least-once delivery means `write_batch()` can see the same `event_id`
+more than once — either redelivered within one batch, or in a fresh batch
+after a crash-and-replay. `storage/writer.py` absorbs both cases before
+anything is written to Parquet:
+
+1. **Within a batch** — rows with an `event_id` already seen earlier in the
+   same batch are dropped, keeping the first occurrence.
+2. **Across batches** — before writing a date partition, the writer reads
+   back the `event_id` column already stored in that `date=.../` directory
+   and drops any row that's already there. A partition left with zero new
+   rows is skipped entirely (no empty file).
+
+Net result: **at-least-once Kafka delivery + idempotent Parquet write =
+each GitHub `event_id` is stored at most once.** Covered by
+`TestDedupe` in `tests/test_storage.py`, including a test that replays the
+same event across two separate `write_batch()` calls and asserts exactly
+one row lands on disk.
+
 ## Dashboard
 
 ```

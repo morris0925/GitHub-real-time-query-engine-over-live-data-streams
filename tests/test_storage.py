@@ -348,3 +348,63 @@ class TestLateArrivingEvents:
         event = make_raw_event(event_id="e1", created_at=ts)
         paths = write_batch([event], data_dir=tmp_path, threshold_hours=24)
         assert paths[0].parent.name != "date=late"
+
+
+# ── 6. Dedupe / idempotent-write tests ─────────────────────────────────────────
+
+class TestDedupe:
+    """
+    Tests for write_batch's idempotent-write guarantee: at-least-once Kafka
+    delivery can redeliver the same event_id, but each event_id must end up
+    stored at most once. See the "Delivery-semantics guarantee" note in
+    storage/writer.py.
+    """
+
+    def _total_rows(self, data_dir: Path) -> int:
+        files = list(data_dir.glob("**/*.parquet"))
+        return sum(pq.read_table(f).num_rows for f in files)
+
+    def test_duplicate_event_id_within_one_batch_writes_one_row(self, tmp_path: Path):
+        """The same event_id appearing twice in one batch → stored once."""
+        events = [make_raw_event(event_id="dup-1"), make_raw_event(event_id="dup-1")]
+        paths = write_batch(events, data_dir=tmp_path)
+
+        assert len(paths) == 1
+        assert self._total_rows(tmp_path) == 1
+
+    def test_duplicate_event_id_across_batches_writes_one_row(self, tmp_path: Path):
+        """
+        The same event_id redelivered in a SECOND write_batch call (simulating
+        a consumer crash between write_batch() and commit()) must not create
+        a second stored row.
+        """
+        event = make_raw_event(event_id="dup-2")
+        write_batch([event], data_dir=tmp_path)
+        second_paths = write_batch([event], data_dir=tmp_path)
+
+        assert second_paths == []  # nothing new to write — no empty file created
+        assert self._total_rows(tmp_path) == 1
+
+    def test_duplicate_mixed_with_unique_events(self, tmp_path: Path):
+        """A batch with one duplicate and one new event stores only the new one."""
+        write_batch([make_raw_event(event_id="dup-3")], data_dir=tmp_path)
+        paths = write_batch(
+            [make_raw_event(event_id="dup-3"), make_raw_event(event_id="fresh-1")],
+            data_dir=tmp_path,
+        )
+
+        assert len(paths) == 1
+        table = pq.read_table(paths[0])
+        assert table.column("event_id").to_pylist() == ["fresh-1"]
+        assert self._total_rows(tmp_path) == 2
+
+    def test_all_duplicates_in_batch_returns_no_paths(self, tmp_path: Path):
+        """If every row in a batch is already stored, write_batch writes nothing."""
+        write_batch([make_raw_event(event_id="dup-4")], data_dir=tmp_path)
+        paths = write_batch(
+            [make_raw_event(event_id="dup-4"), make_raw_event(event_id="dup-4")],
+            data_dir=tmp_path,
+        )
+
+        assert paths == []
+        assert self._total_rows(tmp_path) == 1
