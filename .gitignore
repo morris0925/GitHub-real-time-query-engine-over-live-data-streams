@@ -9,3 +9,6 @@ __pycache__/
 
 # Data files (generated at runtime)
 data/
+
+# demo_up.sh process logs (generated at runtime)
+logs/
