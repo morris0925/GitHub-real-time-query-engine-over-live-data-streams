@@ -10,9 +10,9 @@ GitHub Events API
       │  poll every 5s
       ▼
 ┌─────────────┐     JSON      ┌──────────────┐    Parquet    ┌──────────────────┐
-│  producer   │ ──────────▶  │    Kafka     │ ──────────▶   │  data/events/    │
-│  (Python)   │   messages   │  (Docker)    │   (consumer)  │  date=YYYY-MM-DD │
-└─────────────┘              └──────────────┘               └────────┬─────────┘
+│  producer   │ ──────────▶   │    Kafka     │ ──────────▶   │  data/events/    │
+│  (Python)   │   messages    │  (Docker)    │   (consumer)  │  date=YYYY-MM-DD │
+└─────────────┘               └──────────────┘               └────────┬─────────┘
                                                                       │
                                                           DuckDB glob scan
                                                                       │
